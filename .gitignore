@@ -1,0 +1,28 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Output videos
+*_portrait/
+*_portrait.mp4
+
+# Temp files
+*.tmp
+*_noaudio.mp4
+*_vid.mp4
+*_aud.aac
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
