@@ -55,7 +55,7 @@ This is what TikTok's "Smart Cut" feature does — except Portrait Split runs lo
 Open a terminal (`Ctrl+Alt+T`) and paste this:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/autopro-ug/portrait-split/main/install.sh)
+bash <(curl -fsSL https://github.com/Dihfahsih1/portrait-split/blob/main/install.sh)
 ```
 
 That's it. The installer handles everything:
