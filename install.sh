@@ -7,8 +7,8 @@
 # ═══════════════════════════════════════════════════════════════════
 set -e
 
-REPO="https://github.com/autopro-ug/portrait-split"
-RAW="https://raw.githubusercontent.com/autopro-ug/portrait-split/main"
+REPO="https://github.com/Dihfahsih1/portrait-split"
+RAW=RAW="https://raw.githubusercontent.com/Dihfahsih1/portrait-split/main"
 INSTALL_DIR="$HOME/.portrait_split"
 VERSION="2.0.0"
 
