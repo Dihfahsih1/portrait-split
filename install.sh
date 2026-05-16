@@ -8,7 +8,7 @@
 set -e
 
 REPO="https://github.com/Dihfahsih1/portrait-split"
-RAW=RAW="https://raw.githubusercontent.com/Dihfahsih1/portrait-split/main"
+RAW="https://raw.githubusercontent.com/Dihfahsih1/portrait-split/main"
 INSTALL_DIR="$HOME/.portrait_split"
 VERSION="2.0.0"
 
