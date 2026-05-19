@@ -94,10 +94,35 @@ class LaunchThread(QThread):
             )
             return
         try:
-            subprocess.Popen(
-                [sys.executable, str(self._script)],
+            # On Windows use pythonw.exe — no console window ever appears.
+            # On Linux/mac sys.executable is fine (it's a GUI process anyway).
+            if sys.platform == "win32":
+                pythonw = Path(sys.executable).parent / "pythonw.exe"
+                interpreter = str(pythonw) if pythonw.exists() else sys.executable
+            else:
+                interpreter = sys.executable
+
+            # Fully detach the child so it lives independently:
+            #   stdin/stdout/stderr -> DEVNULL (no console I/O inherited)
+            #   Windows: DETACHED_PROCESS + CREATE_NO_WINDOW
+            #   Linux/mac: start_new_session=True (new process group,
+            #              survives terminal close)
+            kwargs: dict = dict(
                 cwd=str(HERE),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
+            if sys.platform == "win32":
+                kwargs["creationflags"] = (
+                    subprocess.DETACHED_PROCESS
+                    | subprocess.CREATE_NEW_PROCESS_GROUP
+                    | subprocess.CREATE_NO_WINDOW
+                )
+            else:
+                kwargs["start_new_session"] = True
+
+            subprocess.Popen([interpreter, str(self._script)], **kwargs)
             self.launched.emit(self._label)
         except Exception as e:
             self.failed.emit(self._label, str(e))

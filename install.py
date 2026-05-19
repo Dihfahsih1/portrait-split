@@ -356,61 +356,76 @@ def create_launchers():
 # ── Windows ───────────────────────────────────────────────────────
 
 def _create_launchers_windows():
-    bat = {
-        "digitalchurch.bat": "digitalchurch_dc.py",
-        "portrait-split.bat": "portrait_split_gui.py",
-        "video-slicer.bat":   "video_slicer.py",
-        "portrait-split-cli.bat": "portrait_split.py",
+    # pythonw.exe runs Python with no console window whatsoever
+    pythonw = VENV_DIR / "Scripts" / "pythonw.exe"
+
+    # ── VBS launchers for GUI apps (completely silent, no flash) ──
+    # wscript.exe runs .vbs files with zero visible window.
+    # Run() second arg "0" = SW_HIDE — the process is invisible.
+    gui_apps = {
+        "digitalchurch.vbs":  "digitalchurch_dc.py",
+        "portrait-split.vbs": "portrait_split_gui.py",
+        "video-slicer.vbs":   "video_slicer.py",
     }
-    for bat_name, script in bat.items():
-        bat_path = INSTALL_DIR / bat_name
-        bat_path.write_text(
-            f'@echo off\ncd /d "%~dp0"\nvenv\\Scripts\\python.exe {script} %*\n',
+    for vbs_name, script in gui_apps.items():
+        vbs_path = INSTALL_DIR / vbs_name
+        vbs_path.write_text(
+            'Set sh = CreateObject("WScript.Shell")\n'
+            f'sh.Run Chr(34) & "{pythonw}" & Chr(34)'
+            f' & " " & Chr(34) & "{INSTALL_DIR / script}" & Chr(34), 0, False\n'
+            'Set sh = Nothing\n',
             encoding="utf-8",
         )
-    ok("Created .bat launchers in install folder")
 
-    # Start Menu shortcuts via PowerShell
+    # ── BAT only for CLI tool (needs a visible console) ──────────
+    bat_path = INSTALL_DIR / "portrait-split-cli.bat"
+    bat_path.write_text(
+        '@echo off\ncd /d "%~dp0"\nvenv\\Scripts\\python.exe portrait_split.py %*\n',
+        encoding="utf-8",
+    )
+    ok("Created silent VBS launchers + CLI bat in install folder")
+
+    # ── Start Menu shortcuts ──────────────────────────────────────
+    # Point to wscript.exe with the .vbs as argument — zero console,
+    # works from Start Menu, Run dialog, or desktop shortcut.
     start_menu = Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/DigitalChurch DC"
     start_menu.mkdir(parents=True, exist_ok=True)
 
+    wscript = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/wscript.exe"
+
     shortcuts = [
-        ("DIGITALCHURCH DC",  "digitalchurch_dc.py",      "🎬 DC Media Hub"),
-        ("Portrait Split",    "portrait_split_gui.py",    "📐 Face-tracked portrait reframe"),
-        ("VideoSlicer",       "video_slicer.py",          "✂ Precision video cutter"),
+        ("DIGITALCHURCH DC", "digitalchurch.vbs",  "DC Media Hub — Portrait reframe + Video slicer"),
+        ("Portrait Split",   "portrait-split.vbs", "Face-tracked portrait video reframe"),
+        ("VideoSlicer",      "video-slicer.vbs",   "Precision video cutter"),
     ]
 
-    ps_template = """
-$WshShell = New-Object -comObject WScript.Shell
-$Shortcut = $WshShell.CreateShortcut("{lnk}")
-$Shortcut.TargetPath = "{python}"
-$Shortcut.Arguments = '"{script}"'
-$Shortcut.WorkingDirectory = "{wdir}"
-$Shortcut.Description = "{desc}"
-$Shortcut.Save()
-"""
-    python_path = str(VENV_PYTHON)
+    ps_template = (
+        '$ws = New-Object -ComObject WScript.Shell;'
+        '$s  = $ws.CreateShortcut("{lnk}");'
+        '$s.TargetPath       = "{target}";'
+        '$s.Arguments        = \'"{vbs}"\';'
+        '$s.WorkingDirectory = "{wdir}";'
+        '$s.Description      = "{desc}";'
+        '$s.Save()'
+    )
     created = 0
-    for name, script, desc in shortcuts:
-        lnk  = str(start_menu / f"{name}.lnk")
-        scr  = str(INSTALL_DIR / script)
-        ps   = ps_template.format(
-            lnk=lnk, python=python_path, script=scr,
-            wdir=str(INSTALL_DIR), desc=desc,
+    for name, vbs_name, desc in shortcuts:
+        lnk = str(start_menu / f"{name}.lnk")
+        vbs = str(INSTALL_DIR / vbs_name)
+        ps  = ps_template.format(
+            lnk=lnk, target=str(wscript),
+            vbs=vbs, wdir=str(INSTALL_DIR), desc=desc,
         )
-        result = run(
-            ["powershell", "-NoProfile", "-Command", ps],
-            check=False, capture=True,
-        )
+        result = run(["powershell", "-NoProfile", "-Command", ps],
+                     check=False, capture=True)
         if result.returncode == 0:
             created += 1
 
     if created:
-        ok(f"Start Menu shortcuts created  →  {start_menu}")
+        ok(f"Start Menu shortcuts created  ->  {start_menu}")
     else:
-        warn("Could not create Start Menu shortcuts — run the .bat files directly")
+        warn("Could not create Start Menu shortcuts — double-click the .vbs files directly")
 
-    # Add install dir to user PATH
     _add_to_path_windows()
 
 
@@ -444,6 +459,9 @@ def _add_to_path_windows():
 # ── Linux ─────────────────────────────────────────────────────────
 
 def _create_launchers_linux():
+    # nohup + & fully detaches the process from the shell session.
+    # Closing the terminal, logging out, or anything else won't kill the app.
+    # stdout/stderr go to /dev/null so no stray output lingers.
     launchers = {
         "launch_dc.sh":       "digitalchurch_dc.py",
         "launch_portrait.sh": "portrait_split_gui.py",
@@ -452,9 +470,20 @@ def _create_launchers_linux():
     }
     for sh_name, script in launchers.items():
         sh = INSTALL_DIR / sh_name
-        sh.write_text(
-            f'#!/bin/bash\ncd "$(dirname "$0")"\nexec venv/bin/python3 {script} "$@"\n'
-        )
+        is_cli = (sh_name == "cli.sh")
+        if is_cli:
+            # CLI tool keeps its terminal so the user can see output
+            sh.write_text(
+                f'#!/bin/bash\ncd "$(dirname "$0")"\nexec venv/bin/python3 {script} "$@"\n'
+            )
+        else:
+            # GUI tools: detach completely — no terminal, survives shell close
+            sh.write_text(
+                f'#!/bin/bash\n'
+                f'cd "$(dirname "$0")"\n'
+                f'nohup venv/bin/python3 {script} "$@" > /dev/null 2>&1 &\n'
+                f'disown\n'
+            )
         sh.chmod(0o755)
 
     symlinks = {
@@ -500,17 +529,26 @@ def _create_launchers_linux():
 
 def _create_launchers_mac():
     apps = {
-        "digitalchurch":     "digitalchurch_dc.py",
-        "portrait-split":    "portrait_split_gui.py",
-        "video-slicer":      "video_slicer.py",
-        "portrait-split-cli":"portrait_split.py",
+        "digitalchurch":      "digitalchurch_dc.py",
+        "portrait-split":     "portrait_split_gui.py",
+        "video-slicer":       "video_slicer.py",
+        "portrait-split-cli": "portrait_split.py",
     }
     bin_dir = Path("/usr/local/bin")
     for cmd, script in apps.items():
         sh = INSTALL_DIR / f"{cmd}.sh"
-        sh.write_text(
-            f'#!/bin/bash\ncd "{INSTALL_DIR}"\nexec venv/bin/python3 {script} "$@"\n'
-        )
+        is_cli = (cmd == "portrait-split-cli")
+        if is_cli:
+            sh.write_text(
+                f'#!/bin/bash\ncd "{INSTALL_DIR}"\nexec venv/bin/python3 {script} "$@"\n'
+            )
+        else:
+            sh.write_text(
+                f'#!/bin/bash\n'
+                f'cd "{INSTALL_DIR}"\n'
+                f'nohup venv/bin/python3 {script} "$@" > /dev/null 2>&1 &\n'
+                f'disown\n'
+            )
         sh.chmod(0o755)
         link = bin_dir / cmd
         run(["sudo", "ln", "-sf", str(sh), str(link)], check=False)
