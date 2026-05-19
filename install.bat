@@ -1,21 +1,29 @@
 @echo off
 :: ═══════════════════════════════════════════════════════════════
-::   DIGITALCHURCH DC — Windows Installer (v3 - pth fix)
-::   Properly handles embeddable Python + pip + FFmpeg
+::   DIGITALCHURCH DC — Windows Installer (v4 - stable)
+::   Fixes: window disappearing, silent errors, pth patch
 :: ═══════════════════════════════════════════════════════════════
 setlocal EnableDelayedExpansion
 
 title DIGITALCHURCH DC — Installer
+
+:: ── Keep window open on ANY unexpected exit ──────────────────────
+:: This trap ensures errors are always visible
+if "%~1"=="ELEVATED" goto :main
 
 :: ── Self-elevate to Administrator ───────────────────────────────
 net session >nul 2>&1
 if %errorlevel% neq 0 (
     echo  [INFO] Requesting Administrator privileges...
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "Start-Process -FilePath '%~f0' -Verb RunAs -Wait"
+        "Start-Process -FilePath 'cmd.exe' -ArgumentList '/k \"%~f0\" ELEVATED' -Verb RunAs"
     exit /b 0
 )
 
+:: Already admin, run directly
+goto :main
+
+:main
 cls
 echo.
 echo  +----------------------------------------------------------+
@@ -34,7 +42,6 @@ set "EMBED_DIR=%INSTALL_DIR%\python-embed"
 set "SCRIPTS_DIR=%EMBED_DIR%\Scripts"
 set "FFMPEG_DIR=%INSTALL_DIR%\ffmpeg"
 set "PYTHON_BIN=%EMBED_DIR%\python.exe"
-set "PTH_FILE=%EMBED_DIR%\python311._pth"
 
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 
@@ -44,11 +51,11 @@ if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 echo  [1/5] Setting up Python...
 
 if exist "%PYTHON_BIN%" (
-    echo  [OK] Portable Python already installed
+    echo  [OK] Portable Python already installed - skipping download
     goto :patch_pth
 )
 
-echo  Downloading portable Python 3.11...
+echo  Downloading portable Python 3.11 ...
 curl.exe -fsSL "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip" ^
     -o "%TEMP%\pyembed.zip"
 if %errorlevel% neq 0 (
@@ -56,8 +63,10 @@ if %errorlevel% neq 0 (
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
         "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip' -OutFile '%TEMP%\pyembed.zip'"
     if !errorlevel! neq 0 (
+        echo.
         echo  [ERROR] Failed to download Python. Check your internet connection.
-        pause & exit /b 1
+        echo.
+        goto :error
     )
 )
 
@@ -65,47 +74,52 @@ echo  Extracting Python...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "Expand-Archive -Path '%TEMP%\pyembed.zip' -DestinationPath '%EMBED_DIR%' -Force"
 if %errorlevel% neq 0 (
+    echo.
     echo  [ERROR] Failed to extract Python archive.
-    pause & exit /b 1
+    echo.
+    goto :error
 )
 del "%TEMP%\pyembed.zip" >nul 2>&1
 
 if not exist "%PYTHON_BIN%" (
+    echo.
     echo  [ERROR] Python executable not found after extraction.
-    pause & exit /b 1
+    echo  Expected: %PYTHON_BIN%
+    echo.
+    goto :error
 )
-echo  [OK] Python downloaded
+echo  [OK] Python downloaded and extracted
 
 :: ── Patch .pth to enable site-packages ──────────────────────────
-:: FIX: The embeddable zip ships with "#import site" (commented out).
-:: Previous version used findstr /C:"import site" which matched the
-:: comment and skipped the patch entirely. Now we:
-::   1) Use PowerShell to replace "#import site" with "import site"
-::   2) Use findstr /B (beginning of line) to verify the patch worked
 :patch_pth
-echo  Patching python311._pth to enable site-packages...
+echo  Patching .pth file to enable site-packages...
 
-if not exist "%PTH_FILE%" (
-    echo  [WARN] .pth file not found, creating one...
+:: Find the actual .pth file (name may vary by Python version)
+set "PTH_FILE="
+for %%f in ("%EMBED_DIR%\python3*._pth") do (
+    set "PTH_FILE=%%f"
+)
+
+if not defined PTH_FILE (
+    echo  [WARN] No ._pth file found - creating python311._pth manually
+    set "PTH_FILE=%EMBED_DIR%\python311._pth"
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "Set-Content -Path '%PTH_FILE%' -Value 'python311.zip`n.`nimport site'"
+        "Set-Content -Path '%EMBED_DIR%\python311._pth' -Value 'python311.zip`n.`n`nimport site'"
+    echo  [OK] Created new .pth file
     goto :ffmpeg
 )
 
-:: Step 1: Replace commented "#import site" with "import site"
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "(Get-Content '%PTH_FILE%') -replace '^#import site', 'import site' | Set-Content '%PTH_FILE%'"
+echo  Found: !PTH_FILE!
 
-:: Step 2: Check with /B (line-start match) — won't match "#import site"
-findstr /B /C:"import site" "%PTH_FILE%" >nul 2>&1
-if %errorlevel% neq 0 (
-    :: Still not there — append it
-    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "Add-Content -Path '%PTH_FILE%' -Value 'import site'"
-    echo  [OK] Python .pth patched (appended)
-) else (
-    echo  [OK] Python .pth patched successfully
-)
+:: Use PowerShell to safely replace "#import site" with "import site"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$content = Get-Content '!PTH_FILE!' -Raw; $fixed = $content -replace '#import site','import site'; Set-Content '!PTH_FILE!' -Value $fixed -NoNewline"
+
+:: Verify the patch worked
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$c = Get-Content '!PTH_FILE!' -Raw; if ($c -notmatch '(?m)^import site') { Add-Content '!PTH_FILE!' \"`nimport site\"; Write-Host 'Appended import site' } else { Write-Host 'Patch verified OK' }"
+
+echo  [OK] .pth file patched
 
 :: ════════════════════════════════════════════════════════════════
 ::  STEP 2 — FFmpeg
@@ -115,7 +129,7 @@ echo.
 echo  [2/5] Setting up FFmpeg...
 
 if exist "%FFMPEG_DIR%\bin\ffmpeg.exe" (
-    echo  [OK] FFmpeg already installed
+    echo  [OK] FFmpeg already installed - skipping download
     goto :pip
 )
 
@@ -127,8 +141,10 @@ if %errorlevel% neq 0 (
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
         "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile '%TEMP%\ffmpeg.zip'"
     if !errorlevel! neq 0 (
+        echo.
         echo  [ERROR] Failed to download FFmpeg.
-        pause & exit /b 1
+        echo.
+        goto :error
     )
 )
 
@@ -140,7 +156,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 set "FFMPEG_FOUND=0"
 for /d %%d in ("%TEMP%\ffmpeg_temp\ffmpeg-*") do (
     if exist "%%d\bin\ffmpeg.exe" (
-        echo  Copying FFmpeg from %%d...
+        echo  Copying FFmpeg binaries...
         xcopy "%%d\*" "%FFMPEG_DIR%\" /E /I /Y >nul
         set "FFMPEG_FOUND=1"
     )
@@ -149,18 +165,23 @@ for /d %%d in ("%TEMP%\ffmpeg_temp\ffmpeg-*") do (
 rd /s /q "%TEMP%\ffmpeg_temp" >nul 2>&1
 del "%TEMP%\ffmpeg.zip" >nul 2>&1
 
-if "%FFMPEG_FOUND%"=="0" (
+if "!FFMPEG_FOUND!"=="0" (
+    echo.
     echo  [ERROR] FFmpeg binary not found inside archive.
-    pause & exit /b 1
+    echo.
+    goto :error
 )
 if not exist "%FFMPEG_DIR%\bin\ffmpeg.exe" (
+    echo.
     echo  [ERROR] FFmpeg copy failed.
-    pause & exit /b 1
+    echo.
+    goto :error
 )
 
+:: Add FFmpeg to PATH for this session and permanently for the user
 set "PATH=%FFMPEG_DIR%\bin;%PATH%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$cur=[Environment]::GetEnvironmentVariable('Path','User'); if ($cur -notlike '*%FFMPEG_DIR%\bin*') { [Environment]::SetEnvironmentVariable('Path',$cur+';%FFMPEG_DIR%\bin','User') }"
+    "$cur=[Environment]::GetEnvironmentVariable('Path','User'); if ($cur -notlike '*%FFMPEG_DIR%*') { [Environment]::SetEnvironmentVariable('Path',$cur+';%FFMPEG_DIR%\bin','User') }"
 
 echo  [OK] FFmpeg installed
 
@@ -171,8 +192,7 @@ echo  [OK] FFmpeg installed
 echo.
 echo  [3/5] Bootstrapping pip...
 
-:: Add Scripts dir so pip.exe is findable after install
-set "PATH=%SCRIPTS_DIR%;%PATH%"
+set "PATH=%SCRIPTS_DIR%;%FFMPEG_DIR%\bin;%PATH%"
 
 "%PYTHON_BIN%" -m pip --version >nul 2>&1
 if %errorlevel% equ 0 (
@@ -183,30 +203,37 @@ if %errorlevel% equ 0 (
 echo  Downloading get-pip.py...
 curl.exe -fsSL "https://bootstrap.pypa.io/get-pip.py" -o "%TEMP%\get-pip.py"
 if %errorlevel% neq 0 (
+    echo.
     echo  [ERROR] Failed to download get-pip.py.
-    pause & exit /b 1
+    echo.
+    goto :error
 )
 
+echo  Installing pip...
 "%PYTHON_BIN%" "%TEMP%\get-pip.py"
 if %errorlevel% neq 0 (
-    echo  [ERROR] pip bootstrap script failed.
+    echo.
+    echo  [ERROR] pip bootstrap failed.
+    echo.
+    echo  Most likely cause: the .pth file was not patched correctly.
+    echo  Check this file - it must contain "import site" (no # prefix):
+    echo    !PTH_FILE!
+    echo.
     del "%TEMP%\get-pip.py" >nul 2>&1
-    pause & exit /b 1
+    goto :error
 )
 del "%TEMP%\get-pip.py" >nul 2>&1
 
 "%PYTHON_BIN%" -m pip --version >nul 2>&1
 if %errorlevel% neq 0 (
+    echo.
     echo  [ERROR] pip still not working after install.
-    echo  ------------------------------------
-    echo  Manual fix: open this file and check
-    echo  that "import site" appears on its own
-    echo  line (no # prefix):
-    echo    %PTH_FILE%
-    echo  ------------------------------------
-    pause & exit /b 1
+    echo  Manual fix: open this file and ensure "import site" appears
+    echo  on its own line with NO # prefix:
+    echo    !PTH_FILE!
+    echo.
+    goto :error
 )
-
 echo  [OK] pip ready
 
 :: ════════════════════════════════════════════════════════════════
@@ -217,28 +244,34 @@ echo.
 echo  [4/5] Installing required packages...
 
 echo  Upgrading pip...
-"%PYTHON_BIN%" -m pip install --upgrade pip
+"%PYTHON_BIN%" -m pip install --upgrade pip --quiet
 if %errorlevel% neq 0 echo  [WARN] pip upgrade failed, continuing...
 
 echo  Installing PyQt6...
 "%PYTHON_BIN%" -m pip install PyQt6 PyQt6-Qt6
 if %errorlevel% neq 0 (
+    echo.
     echo  [ERROR] Failed to install PyQt6.
-    pause & exit /b 1
+    echo.
+    goto :error
 )
 
 echo  Installing yt-dlp...
 "%PYTHON_BIN%" -m pip install yt-dlp
 if %errorlevel% neq 0 (
+    echo.
     echo  [ERROR] Failed to install yt-dlp.
-    pause & exit /b 1
+    echo.
+    goto :error
 )
 
 echo  Installing opencv-python and numpy...
 "%PYTHON_BIN%" -m pip install opencv-python numpy
 if %errorlevel% neq 0 (
+    echo.
     echo  [ERROR] Failed to install opencv-python / numpy.
-    pause & exit /b 1
+    echo.
+    goto :error
 )
 
 echo  [OK] All packages installed
@@ -255,30 +288,39 @@ if exist "%~dp0install.py" (
     echo  Using local install.py...
     "%PYTHON_BIN%" "%~dp0install.py"
     if !errorlevel! neq 0 (
+        echo.
         echo  [ERROR] install.py exited with an error.
-        pause & exit /b 1
+        echo.
+        goto :error
     )
 ) else (
     echo  Downloading install.py from GitHub...
     curl.exe -fsSL "https://raw.githubusercontent.com/Dihfahsih1/portrait-split/main/install.py" ^
         -o "%TEMP%\dc_install.py"
     if %errorlevel% neq 0 (
+        echo.
         echo  [ERROR] Failed to download install.py from GitHub.
-        pause & exit /b 1
+        echo  Check that the file exists at:
+        echo    https://github.com/Dihfahsih1/portrait-split/blob/main/install.py
+        echo.
+        goto :error
     )
 
+    :: Check for 404 HTML response
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$c=Get-Content '%TEMP%\dc_install.py' -Raw; if ($c -match '404' -and $c -match '<html') { Write-Host '[ERROR] GitHub returned a 404 page. Check the repository path.'; exit 1 }"
+        "$c=Get-Content '%TEMP%\dc_install.py' -Raw; if ($c -match '404' -and $c -match '<html') { Write-Host '[ERROR] GitHub returned a 404 page - file not found in repo'; exit 1 }"
     if %errorlevel% neq 0 (
         del "%TEMP%\dc_install.py" >nul 2>&1
-        pause & exit /b 1
+        goto :error
     )
 
     "%PYTHON_BIN%" "%TEMP%\dc_install.py"
     if !errorlevel! neq 0 (
+        echo.
         echo  [ERROR] install.py exited with an error.
+        echo.
         del "%TEMP%\dc_install.py" >nul 2>&1
-        pause & exit /b 1
+        goto :error
     )
     del "%TEMP%\dc_install.py" >nul 2>&1
 )
@@ -291,5 +333,20 @@ echo  ^|     You can now run VideoSlicer.                         ^|
 echo  ^|                                                          ^|
 echo  +----------------------------------------------------------+
 echo.
-pause
+echo  Press any key to close this window...
+pause >nul
 exit /b 0
+
+:: ════════════════════════════════════════════════════════════════
+::  ERROR HANDLER — always shows the error before pausing
+:: ════════════════════════════════════════════════════════════════
+:error
+echo  ============================================================
+echo   INSTALLATION FAILED
+echo   Scroll up to find the [ERROR] message above.
+echo   Screenshot this window and share it for support.
+echo  ============================================================
+echo.
+echo  Press any key to close...
+pause >nul
+exit /b 1
