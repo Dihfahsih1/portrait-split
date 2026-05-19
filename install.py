@@ -243,6 +243,8 @@ def _install_system_deps_linux():
     )
     if result.returncode == 0:
         ok("PyQt6 + Qt6Multimedia installed via apt")
+        # Ensure INSTALL_DIR exists before writing the marker file
+        INSTALL_DIR.mkdir(parents=True, exist_ok=True)
         # Mark so venv uses --system-site-packages
         (INSTALL_DIR / ".apt_pyqt6").touch()
     else:
