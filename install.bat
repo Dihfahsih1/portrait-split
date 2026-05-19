@@ -1,6 +1,6 @@
 @echo off
 :: ═══════════════════════════════════════════════════════════════
-::   DIGITALCHURCH DC — Windows Installer (Stable + Fixed)
+::   DIGITALCHURCH DC — Windows Installer (v3 - pth fix)
 ::   Properly handles embeddable Python + pip + FFmpeg
 :: ═══════════════════════════════════════════════════════════════
 setlocal EnableDelayedExpansion
@@ -20,7 +20,7 @@ cls
 echo.
 echo  +----------------------------------------------------------+
 echo  ^|                                                          ^|
-echo  ^|     DIGITALCHURCH DC  —  Windows Installer              ^|
+echo  ^|     DIGITALCHURCH DC  --  Windows Installer             ^|
 echo  ^|     Portrait Split  +  Ultra-Fast VideoSlicer           ^|
 echo  ^|                                                          ^|
 echo  +----------------------------------------------------------+
@@ -31,6 +31,7 @@ echo.
 :: ── Paths ────────────────────────────────────────────────────────
 set "INSTALL_DIR=%LOCALAPPDATA%\DigitalChurch"
 set "EMBED_DIR=%INSTALL_DIR%\python-embed"
+set "SCRIPTS_DIR=%EMBED_DIR%\Scripts"
 set "FFMPEG_DIR=%INSTALL_DIR%\ffmpeg"
 set "PYTHON_BIN=%EMBED_DIR%\python.exe"
 set "PTH_FILE=%EMBED_DIR%\python311._pth"
@@ -44,7 +45,7 @@ echo  [1/5] Setting up Python...
 
 if exist "%PYTHON_BIN%" (
     echo  [OK] Portable Python already installed
-    goto :check_pth
+    goto :patch_pth
 )
 
 echo  Downloading portable Python 3.11...
@@ -75,24 +76,36 @@ if not exist "%PYTHON_BIN%" (
 )
 echo  [OK] Python downloaded
 
-:: ── Patch .pth to enable site-packages (required for pip) ───────
-:check_pth
+:: ── Patch .pth to enable site-packages ──────────────────────────
+:: FIX: The embeddable zip ships with "#import site" (commented out).
+:: Previous version used findstr /C:"import site" which matched the
+:: comment and skipped the patch entirely. Now we:
+::   1) Use PowerShell to replace "#import site" with "import site"
+::   2) Use findstr /B (beginning of line) to verify the patch worked
+:patch_pth
+echo  Patching python311._pth to enable site-packages...
+
 if not exist "%PTH_FILE%" (
-    echo  [WARN] .pth file not found, skipping site patch
+    echo  [WARN] .pth file not found, creating one...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "Set-Content -Path '%PTH_FILE%' -Value 'python311.zip`n.`nimport site'"
     goto :ffmpeg
 )
 
-:: Check if already patched
-findstr /C:"import site" "%PTH_FILE%" >nul 2>&1
-if %errorlevel% equ 0 (
-    echo  [OK] Python .pth already patched
-    goto :ffmpeg
-)
-
-:: Use PowerShell to safely append — avoids trailing-space bug with echo
+:: Step 1: Replace commented "#import site" with "import site"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "Add-Content -Path '%PTH_FILE%' -Value 'import site'"
-echo  [OK] Python .pth patched
+    "(Get-Content '%PTH_FILE%') -replace '^#import site', 'import site' | Set-Content '%PTH_FILE%'"
+
+:: Step 2: Check with /B (line-start match) — won't match "#import site"
+findstr /B /C:"import site" "%PTH_FILE%" >nul 2>&1
+if %errorlevel% neq 0 (
+    :: Still not there — append it
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "Add-Content -Path '%PTH_FILE%' -Value 'import site'"
+    echo  [OK] Python .pth patched (appended)
+) else (
+    echo  [OK] Python .pth patched successfully
+)
 
 :: ════════════════════════════════════════════════════════════════
 ::  STEP 2 — FFmpeg
@@ -114,7 +127,7 @@ if %errorlevel% neq 0 (
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
         "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile '%TEMP%\ffmpeg.zip'"
     if !errorlevel! neq 0 (
-        echo  [ERROR] Failed to download FFmpeg. Check your internet connection.
+        echo  [ERROR] Failed to download FFmpeg.
         pause & exit /b 1
     )
 )
@@ -124,7 +137,6 @@ if exist "%TEMP%\ffmpeg_temp" rd /s /q "%TEMP%\ffmpeg_temp" >nul 2>&1
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "Expand-Archive -Path '%TEMP%\ffmpeg.zip' -DestinationPath '%TEMP%\ffmpeg_temp' -Force"
 
-:: Find the extracted folder (name varies by version) and copy contents
 set "FFMPEG_FOUND=0"
 for /d %%d in ("%TEMP%\ffmpeg_temp\ffmpeg-*") do (
     if exist "%%d\bin\ffmpeg.exe" (
@@ -138,19 +150,17 @@ rd /s /q "%TEMP%\ffmpeg_temp" >nul 2>&1
 del "%TEMP%\ffmpeg.zip" >nul 2>&1
 
 if "%FFMPEG_FOUND%"=="0" (
-    echo  [ERROR] FFmpeg binary not found inside archive. Structure may have changed.
+    echo  [ERROR] FFmpeg binary not found inside archive.
     pause & exit /b 1
 )
-
 if not exist "%FFMPEG_DIR%\bin\ffmpeg.exe" (
-    echo  [ERROR] FFmpeg copy failed. Target path does not contain ffmpeg.exe.
+    echo  [ERROR] FFmpeg copy failed.
     pause & exit /b 1
 )
 
-:: Add FFmpeg to PATH for this session and persistently for the user
 set "PATH=%FFMPEG_DIR%\bin;%PATH%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$current = [Environment]::GetEnvironmentVariable('Path', 'User'); if ($current -notlike '*%FFMPEG_DIR%\bin*') { [Environment]::SetEnvironmentVariable('Path', $current + ';%FFMPEG_DIR%\bin', 'User') }"
+    "$cur=[Environment]::GetEnvironmentVariable('Path','User'); if ($cur -notlike '*%FFMPEG_DIR%\bin*') { [Environment]::SetEnvironmentVariable('Path',$cur+';%FFMPEG_DIR%\bin','User') }"
 
 echo  [OK] FFmpeg installed
 
@@ -161,7 +171,9 @@ echo  [OK] FFmpeg installed
 echo.
 echo  [3/5] Bootstrapping pip...
 
-:: Check if pip is already available
+:: Add Scripts dir so pip.exe is findable after install
+set "PATH=%SCRIPTS_DIR%;%PATH%"
+
 "%PYTHON_BIN%" -m pip --version >nul 2>&1
 if %errorlevel% equ 0 (
     echo  [OK] pip already available
@@ -177,7 +189,7 @@ if %errorlevel% neq 0 (
 
 "%PYTHON_BIN%" "%TEMP%\get-pip.py"
 if %errorlevel% neq 0 (
-    echo  [ERROR] pip bootstrap failed.
+    echo  [ERROR] pip bootstrap script failed.
     del "%TEMP%\get-pip.py" >nul 2>&1
     pause & exit /b 1
 )
@@ -185,7 +197,13 @@ del "%TEMP%\get-pip.py" >nul 2>&1
 
 "%PYTHON_BIN%" -m pip --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo  [ERROR] pip installed but not working. Check the .pth patch above.
+    echo  [ERROR] pip still not working after install.
+    echo  ------------------------------------
+    echo  Manual fix: open this file and check
+    echo  that "import site" appears on its own
+    echo  line (no # prefix):
+    echo    %PTH_FILE%
+    echo  ------------------------------------
     pause & exit /b 1
 )
 
@@ -200,9 +218,7 @@ echo  [4/5] Installing required packages...
 
 echo  Upgrading pip...
 "%PYTHON_BIN%" -m pip install --upgrade pip
-if %errorlevel% neq 0 (
-    echo  [WARN] pip upgrade failed, continuing anyway...
-)
+if %errorlevel% neq 0 echo  [WARN] pip upgrade failed, continuing...
 
 echo  Installing PyQt6...
 "%PYTHON_BIN%" -m pip install PyQt6 PyQt6-Qt6
@@ -233,8 +249,7 @@ echo  [OK] All packages installed
 echo.
 echo  [5/5] Running main installer...
 
-:: Ensure FFmpeg is on PATH for the install.py subprocess
-set "PATH=%FFMPEG_DIR%\bin;%PATH%"
+set "PATH=%FFMPEG_DIR%\bin;%SCRIPTS_DIR%;%PATH%"
 
 if exist "%~dp0install.py" (
     echo  Using local install.py...
@@ -249,14 +264,11 @@ if exist "%~dp0install.py" (
         -o "%TEMP%\dc_install.py"
     if %errorlevel% neq 0 (
         echo  [ERROR] Failed to download install.py from GitHub.
-        echo  Make sure the file exists at:
-        echo    https://raw.githubusercontent.com/Dihfahsih1/portrait-split/main/install.py
         pause & exit /b 1
     )
 
-    :: Sanity check — make sure we didn't download a 404 HTML page
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$content = Get-Content '%TEMP%\dc_install.py' -Raw; if ($content -match '404' -and $content -match 'html') { Write-Host '[ERROR] GitHub returned a 404 page. Check your repository path.'; exit 1 }"
+        "$c=Get-Content '%TEMP%\dc_install.py' -Raw; if ($c -match '404' -and $c -match '<html') { Write-Host '[ERROR] GitHub returned a 404 page. Check the repository path.'; exit 1 }"
     if %errorlevel% neq 0 (
         del "%TEMP%\dc_install.py" >nul 2>&1
         pause & exit /b 1
@@ -271,7 +283,6 @@ if exist "%~dp0install.py" (
     del "%TEMP%\dc_install.py" >nul 2>&1
 )
 
-:: ════════════════════════════════════════════════════════════════
 echo.
 echo  +----------------------------------------------------------+
 echo  ^|                                                          ^|
