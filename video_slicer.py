@@ -1,18 +1,9 @@
 #!/usr/bin/env python3
 """
-VideoSlicer  v2.0
+VideoSlicer  v2.1 — ULTRA FAST
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Precision video cutter — local files or YouTube, zero quality loss.
-Uses FFmpeg -c copy so the original codec/resolution is untouched.
-
-New in v2.0:
-  • In-app video preview with scrub bar (local files)
-  • Click-to-set Start / End markers directly from the timeline
-  • YouTube: --concurrent-fragments 8 to break throttling
-
-Install: pip install PyQt6 yt-dlp
-         (also needs PyQt6-Qt6Multimedia for video preview)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Now with direct stream + FFmpeg remote seeking for maximum speed.
 """
 
 import os
@@ -23,19 +14,16 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import (
-    QEasingCurve, QPropertyAnimation, QRect, QSize,
     Qt, QThread, QTimer, QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QColor, QDragEnterEvent, QDropEvent, QFont,
-    QFontMetrics, QIcon, QLinearGradient, QPainter,
-    QPainterPath, QPalette, QPen, QPixmap,
+    QColor, QDragEnterEvent, QDropEvent, QFont, QPalette,
 )
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QProgressBar,
-    QPushButton, QScrollArea, QSizePolicy, QSpacerItem,
-    QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QSlider,
+    QPushButton, QScrollArea, QStackedWidget, QTextEdit,
+    QVBoxLayout, QWidget, QSlider,
 )
 
 # Optional — gracefully disabled if PyQt6-Qt6Multimedia not installed
@@ -182,7 +170,7 @@ def have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
-# ── Worker thread ──────────────────────────────────────────────────
+# ── Worker thread (ULTRA FAST) ─────────────────────────────────────
 
 class Worker(QThread):
     log      = pyqtSignal(str, str)
@@ -234,55 +222,93 @@ class Worker(QThread):
         self.log.emit(f"{'─'*52}\n", MUTED)
 
         if mode == "file":
-            self._slice_local(t["source"], t_from, t_to, dur, out_path)
+            self._slice_local(t["source"], t_from, dur, out_path)
         else:
-            self._slice_youtube(t["source"], t_from, t_to, dur, out_path)
+            self._slice_youtube(t["source"], t_from, dur, out_path)
 
         return out_path
 
-    def _slice_local(self, src, t_from, t_to, dur, out):
-        self.status.emit("Slicing …", ACCENT)
-        self.log.emit("⚙  FFmpeg — stream copy (zero quality loss) …\n", MUTED)
+    def _slice_local(self, src, t_from, dur, out):
+        self.status.emit("⚡ Ultra-fast local slicing …", ACCENT)
+        self.log.emit(
+            "⚙ FFmpeg zero-loss local slicing\n"
+            "   • -ss before -i (instant seek)\n"
+            "   • Stream copy\n"
+            "   • Fast MP4\n", MUTED)
+
         cmd = [
             "ffmpeg", "-y",
-            "-i",  src,
             "-ss", str(t_from),
-            "-to", str(t_to),
+            "-i", src,
+            "-t", str(dur),
             "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",
             out,
         ]
         self._run(cmd, dur)
 
-    def _slice_youtube(self, url, t_from, t_to, dur, out):
-        self.status.emit("Fetching from YouTube …", ACCENT)
-        self.log.emit("⚙  yt-dlp — parallel fragments (8×), stream copy …\n", MUTED)
+    def _slice_youtube(self, url, t_from, dur, out):
+        self.status.emit("⚡ Resolving direct stream URL …", ACCENT)
+        self.log.emit(
+            "🚀 ULTRA-FAST YouTube Mode:\n"
+            "   • Direct progressive MP4\n"
+            "   • FFmpeg remote seeking\n"
+            "   • No fragment reconstruction\n", SUCCESS)
 
-        section = f"*{sec_to_hms(t_from)}-{sec_to_hms(t_to)}"
-        tmp = str(Path(out).parent / f"__tmp_{Path(out).stem}.%(ext)s")
-        cmd = [
+        # Get direct stream URL
+        get_url_cmd = [
             sys.executable, "-m", "yt_dlp",
-            "--download-sections", section,
-            # ── Speed fix: fetch 8 fragments in parallel ──────────
-            # YouTube throttles each connection to ~playback bitrate.
-            # --concurrent-fragments breaks past that by opening N
-            # simultaneous connections, so a 37-min clip takes ~5 min
-            # instead of ~37 min on a fast line.
-            "--concurrent-fragments", "8",
-            "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-            "--merge-output-format", "mp4",
-            "--no-part",
-            "-o", tmp,
-            "--newline",
-            url,
+            "-f", "best[ext=mp4]/best",
+            "--get-url",
+            "--no-warnings",
+            "--no-playlist",
+            "--no-check-certificates",
+            "--no-write-info-json",
+            url
         ]
-        self._run(cmd, dur, mode="ytdlp")
 
-        tmp_resolved = str(Path(out).parent / f"__tmp_{Path(out).stem}.mp4")
-        if Path(tmp_resolved).exists():
-            try: os.replace(tmp_resolved, out)
-            except Exception: pass
+        browser = self._task.get("browser", "None (no cookies)")
+        if browser and browser != "None (no cookies)":
+            get_url_cmd += ["--cookies-from-browser", browser]
+            self.log.emit(f"🍪 Using {browser} cookies\n", MUTED)
 
-    def _run(self, cmd, duration, mode="ffmpeg"):
+        try:
+            result = subprocess.run(
+                get_url_cmd, capture_output=True, text=True, timeout=45
+            )
+        except subprocess.TimeoutExpired:
+            raise ValueError("Timed out resolving YouTube stream URL")
+
+        if result.returncode != 0:
+            raise ValueError(result.stderr.strip() or "Failed to resolve stream URL")
+
+        stream_url = result.stdout.strip().splitlines()[0].strip()
+        if not stream_url:
+            raise ValueError("No stream URL returned")
+
+        self.log.emit("✅ Direct stream URL resolved\n", SUCCESS)
+
+        # FFmpeg ultra-fast remote slicing
+        self.status.emit("⚡ Downloading & slicing range …", ACCENT)
+        cmd = [
+            "ffmpeg", "-y",
+            "-threads", "0",
+            "-multiple_requests", "1",
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+            "-ss", str(t_from),
+            "-i", stream_url,
+            "-t", str(dur),
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",
+            out,
+        ]
+        self._run(cmd, dur)
+
+    def _run(self, cmd, duration):
         self.log.emit("  $ " + " ".join(
             f'"{c}"' if " " in str(c) else str(c) for c in cmd
         ) + "\n", MUTED)
@@ -296,36 +322,11 @@ class Worker(QThread):
                 bufsize=1,
             )
         except FileNotFoundError:
-            raise ValueError(f"'{cmd[0]}' not found — is it installed and in PATH?")
+            raise ValueError("FFmpeg not found — install and add to PATH")
 
         _NOISE = re.compile(
-            r"Late SEI is not implemented"
-            r"|If you want to help, upload a sample"
-            r"|ffmpeg-devel@ffmpeg"
-            r"|streams\.videolan\.org"
-            r"|Press \[q\] to stop"
-            r"|\[h264 @.+\] Late"
-            r"|using cpu capabilities"
-            r"|profile High, level"
-            r"|264 - core \d+"
-            r"|options: cabac="
-            r"|Side data:"
-            r"|cpb: bitrate"
-            r"|^\s+Metadata:"
-            r"|^\s+major_brand\s*:"
-            r"|^\s+minor_version\s*:"
-            r"|^\s+compatible_brands:"
-            r"|^\s+creation_time\s*:"
-            r"|^\s+handler_name\s*:"
-            r"|^\s+vendor_id\s*:"
-            r"|^\s+encoder\s*:"
-            r"|Input #\d+, mov,mp4"
-            r"|from 'https://rr\d"
-            r"|googlevideo\.com"
-            r"|^\s+Duration: \d"
-            r"|^\s+Stream #\d+:\d+\[0x"
-            r"|Output #0, mp4"
-            r"|encoder\s*: Lavf"
+            r"Late SEI|ffmpeg-devel|Press \[q\]|Side data|Metadata:|"
+            r"Stream #|encoder : Lavf|googlevideo|Input #|Output #"
         )
 
         for line in self._proc.stdout:
@@ -334,48 +335,12 @@ class Worker(QThread):
             if not line.strip() or _NOISE.search(line):
                 continue
 
-            if re.match(r"frame=\s*\d+", line):
-                if mode == "ffmpeg":
-                    m = re.search(r"time=(\d+):(\d+):([\d.]+)", line)
-                    if m and duration > 0:
-                        el  = int(m.group(1))*3600 + int(m.group(2))*60 + float(m.group(3))
-                        pct = min(el / duration * 100, 99)
-                        self.progress.emit(pct)
-                        self.status.emit(f"Processing … {pct:.0f}%", ACCENT)
-                continue
-
-            if mode == "ffmpeg":
-                m = re.search(r"time=(\d+):(\d+):([\d.]+)", line)
-                if m and duration > 0:
-                    el  = int(m.group(1))*3600 + int(m.group(2))*60 + float(m.group(3))
-                    pct = min(el / duration * 100, 99)
-                    self.progress.emit(pct)
-                    self.status.emit(f"Processing … {pct:.0f}%", ACCENT)
-            elif mode == "ytdlp":
-                m = re.search(
-                    r"\[download\]\s+([\d.]+)%"
-                    r"(?:\s+of\s+~?([\d.]+\S+))?"
-                    r"(?:\s+at\s+([\d.]+\S+/s))?"
-                    r"(?:\s+ETA\s+(\S+))?", line)
-                if m:
-                    pct  = float(m.group(1))
-                    size = m.group(2) or ""
-                    spd  = m.group(3) or ""
-                    eta  = m.group(4) or ""
-                    self.progress.emit(pct * 0.95)
-                    parts = [f"Downloading … {pct:.1f}%"]
-                    if size: parts.append(f"of {size}")
-                    if spd:  parts.append(f"at {spd}")
-                    if eta:  parts.append(f"ETA {eta}")
-                    self.status.emit("  ".join(parts), ACCENT)
-                    self.log.emit(
-                        f"  [download]  {pct:.1f}%"
-                        + (f"  of {size}" if size else "")
-                        + (f"  at {spd}"  if spd  else "")
-                        + (f"  ETA {eta}" if eta  else ""),
-                        ACCENT
-                    )
-                    continue
+            m = re.search(r"time=(\d+):(\d+):([\d.]+)", line)
+            if m and duration > 0:
+                el  = int(m.group(1))*3600 + int(m.group(2))*60 + float(m.group(3))
+                pct = min(el / duration * 100, 99)
+                self.progress.emit(pct)
+                self.status.emit(f"Processing … {pct:.1f}%", ACCENT)
 
             col = DANGER if "error" in line.lower() else "#7EE787"
             self.log.emit("  " + line, col)
@@ -390,9 +355,8 @@ class Worker(QThread):
 # ── YouTube URL fetcher (for preview) ─────────────────────────────
 
 class YtFetchUrlWorker(QThread):
-    """Uses yt-dlp --get-url to resolve a direct streamable URL (no download)."""
-    ready  = pyqtSignal(str)   # emits the direct stream URL
-    failed = pyqtSignal(str)   # emits error message
+    ready  = pyqtSignal(str)
+    failed = pyqtSignal(str)
 
     def __init__(self, yt_url: str):
         super().__init__()
@@ -403,27 +367,27 @@ class YtFetchUrlWorker(QThread):
             result = subprocess.run(
                 [
                     sys.executable, "-m", "yt_dlp",
-                    "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+                    "-f", "best[ext=mp4]/best",
                     "--get-url",
+                    "--no-warnings",
+                    "--no-playlist",
                     self._yt_url,
                 ],
                 capture_output=True, text=True, timeout=30,
             )
             lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
             if lines:
-                # First URL is the video stream; second (if present) is audio.
-                # QMediaPlayer can handle a combined best[ext=mp4] URL directly.
                 self.ready.emit(lines[0])
             else:
                 err = result.stderr.strip().splitlines()
                 self.failed.emit(err[-1] if err else "yt-dlp returned no URL")
         except subprocess.TimeoutExpired:
-            self.failed.emit("Timed out fetching YouTube URL (30 s)")
+            self.failed.emit("Timed out fetching YouTube URL")
         except Exception as e:
             self.failed.emit(str(e))
 
 
-# ── Custom widgets ─────────────────────────────────────────────────
+# ── Custom widgets (unchanged) ─────────────────────────────────────
 
 class Card(QFrame):
     def __init__(self, title="", parent=None):
@@ -454,7 +418,6 @@ class GlowButton(QPushButton):
         super().__init__(text, parent)
         self._accent  = accent
         self._danger  = danger
-        self._hovered = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumHeight(42)
         self._style()
@@ -519,7 +482,6 @@ class SmallButton(QPushButton):
 
 
 class MarkerButton(QPushButton):
-    """Colored marker-set button (Start = green tint, End = red tint)."""
     def __init__(self, text, color, parent=None):
         super().__init__(text, parent)
         self._color = color
@@ -536,12 +498,8 @@ class MarkerButton(QPushButton):
                 font-weight: 700;
                 padding: 0 12px;
             }}
-            QPushButton:hover {{
-                background: {color}22;
-            }}
-            QPushButton:pressed {{
-                background: {color}44;
-            }}
+            QPushButton:hover {{ background: {color}22; }}
+            QPushButton:pressed {{ background: {color}44; }}
         """)
 
 
@@ -577,9 +535,9 @@ class TabPill(QWidget):
             active = val == self._active
             b.setStyleSheet(f"""
                 QPushButton {{
-                    background: {"" + ACCENT if active else CARD2};
+                    background: {ACCENT if active else CARD2};
                     color: {"#0A0A0A" if active else MUTED2};
-                    border: 1.5px solid {"" + ACCENT if active else BORDER2};
+                    border: 1.5px solid {ACCENT if active else BORDER2};
                     border-radius: 7px;
                     font-family: "{FONT_MAIN}";
                     font-size: 12px;
@@ -639,8 +597,7 @@ class DropZone(QLabel):
 
     def mousePressEvent(self, e):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select video file",
-            str(Path.home() / "Desktop"),
+            self, "Select video file", str(Path.home() / "Desktop"),
             "Video Files (*.mp4 *.mkv *.avi *.mov *.webm *.flv *.ts *.m4v);;All Files (*)",
         )
         if path:
@@ -690,61 +647,29 @@ class TimeInput(QWidget):
     def _validate(self, text):
         try:
             hms_to_sec(text)
-            self._edit.setStyleSheet(f"""
-                QLineEdit {{
-                    background: {SURFACE};
-                    border: 1.5px solid {BORDER};
-                    border-radius: 8px;
-                    color: {ACCENT_L};
-                    padding: 9px 14px;
-                    font-family: "{FONT_MONO}";
-                    font-size: 15px;
-                    font-weight: 700;
-                    text-align: center;
-                }}
-                QLineEdit:focus {{ border: 1.5px solid {ACCENT}; background: #0F1829; }}
-            """)
+            self._edit.setStyleSheet(f"background: {SURFACE}; border: 1.5px solid {BORDER}; border-radius: 8px; color: {ACCENT_L}; padding: 9px 14px; font-family: \"{FONT_MONO}\"; font-size: 15px; font-weight: 700;")
         except Exception:
-            self._edit.setStyleSheet(f"""
-                QLineEdit {{
-                    background: rgba(239,68,68,0.08);
-                    border: 1.5px solid {DANGER};
-                    border-radius: 8px;
-                    color: {DANGER};
-                    padding: 9px 14px;
-                    font-family: "{FONT_MONO}";
-                    font-size: 15px;
-                    font-weight: 700;
-                    text-align: center;
-                }}
-            """)
+            self._edit.setStyleSheet(f"background: rgba(239,68,68,0.08); border: 1.5px solid {DANGER}; border-radius: 8px; color: {DANGER}; padding: 9px 14px; font-family: \"{FONT_MONO}\"; font-size: 15px; font-weight: 700;")
 
     def value(self): return self._edit.text().strip()
     def set_value(self, v): self._edit.setText(v)
 
 
-# ── Video Preview Widget ───────────────────────────────────────────
-
 class VideoPreview(QWidget):
-    """
-    Inline video player with scrub bar and start/end marker buttons.
-    Requires PyQt6-Qt6Multimedia. Hidden automatically if unavailable.
-    """
-    start_set = pyqtSignal(str)   # emits HH:MM:SS
+    start_set = pyqtSignal(str)
     end_set   = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._duration_ms = 0
-        self._dragging    = False
-        self._loaded      = False
+        self._dragging = False
+        self._loaded = False
 
         self.setStyleSheet(f"background: {CARD}; border-radius: 10px;")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 12, 16, 14)
         lay.setSpacing(8)
 
-        # header
         hdr = QHBoxLayout()
         title = QLabel("PREVIEW")
         title.setFont(QFont(FONT_MAIN, 8, QFont.Weight.Bold))
@@ -758,13 +683,11 @@ class VideoPreview(QWidget):
         lay.addLayout(hdr)
 
         if HAS_MULTIMEDIA:
-            # video surface
             self._video = QVideoWidget()
             self._video.setMinimumHeight(260)
             self._video.setStyleSheet("background: #000; border-radius: 8px;")
             lay.addWidget(self._video)
 
-            # media player
             self._player = QMediaPlayer()
             self._audio  = QAudioOutput()
             self._audio.setVolume(0.5)
@@ -772,124 +695,70 @@ class VideoPreview(QWidget):
             self._player.setVideoOutput(self._video)
             self._player.positionChanged.connect(self._on_position)
             self._player.durationChanged.connect(self._on_duration)
-
         else:
-            no_lbl = QLabel(
-                "⚠  PyQt6-Qt6Multimedia not installed\n"
-                "    pip install PyQt6-Qt6Multimedia\n"
-                "    (time inputs still work manually)"
-            )
+            no_lbl = QLabel("⚠  PyQt6-Qt6Multimedia not installed")
             no_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             no_lbl.setMinimumHeight(160)
-            no_lbl.setFont(QFont(FONT_MAIN, 10))
-            no_lbl.setStyleSheet(
-                f"color: {MUTED}; background: {SURFACE}; "
-                f"border-radius: 8px; border: 1px dashed {BORDER2}; padding: 12px;"
-            )
             lay.addWidget(no_lbl)
 
-        # ── scrub bar with overlay markers ────────────────────────
         self._scrub = QSlider(Qt.Orientation.Horizontal)
         self._scrub.setRange(0, 10000)
-        self._scrub.setValue(0)
-        self._scrub.setCursor(Qt.CursorShape.PointingHandCursor)
         self._scrub.sliderPressed.connect(self._on_scrub_press)
         self._scrub.sliderMoved.connect(self._on_scrub_move)
         self._scrub.sliderReleased.connect(self._on_scrub_release)
         lay.addWidget(self._scrub)
 
-        # ── control row ───────────────────────────────────────────
         ctrl = QHBoxLayout()
-        ctrl.setSpacing(8)
-
         self._play_btn = SmallButton("▶  Play")
-        self._play_btn.setFixedWidth(90)
         self._play_btn.clicked.connect(self._toggle_play)
         ctrl.addWidget(self._play_btn)
-
-        # volume
-        self._vol_slider = QSlider(Qt.Orientation.Horizontal)
-        self._vol_slider.setRange(0, 100)
-        self._vol_slider.setValue(50)
-        self._vol_slider.setFixedWidth(70)
-        self._vol_slider.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._vol_slider.setToolTip("Volume")
-        if HAS_MULTIMEDIA:
-            self._vol_slider.valueChanged.connect(
-                lambda v: self._audio.setVolume(v / 100.0))
-        ctrl.addWidget(self._vol_slider)
-
         ctrl.addStretch()
 
-        # markers
         self._set_start_btn = MarkerButton("⬅  Set Start", SUCCESS)
-        self._set_start_btn.setToolTip("Use current position as clip start")
         self._set_start_btn.clicked.connect(self._set_start)
         ctrl.addWidget(self._set_start_btn)
 
         self._set_end_btn = MarkerButton("Set End  ➡", DANGER)
-        self._set_end_btn.setToolTip("Use current position as clip end")
         self._set_end_btn.clicked.connect(self._set_end)
         ctrl.addWidget(self._set_end_btn)
-
         lay.addLayout(ctrl)
 
-        # ── marker position labels ────────────────────────────────
         mrow = QHBoxLayout()
         self._start_marker_lbl = QLabel("▶ Start: —")
-        self._start_marker_lbl.setFont(QFont(FONT_MONO, 9))
         self._start_marker_lbl.setStyleSheet(f"color: {SUCCESS};")
         self._end_marker_lbl = QLabel("⏹ End: —")
-        self._end_marker_lbl.setFont(QFont(FONT_MONO, 9))
         self._end_marker_lbl.setStyleSheet(f"color: {DANGER};")
         mrow.addWidget(self._start_marker_lbl)
         mrow.addStretch()
         mrow.addWidget(self._end_marker_lbl)
         lay.addLayout(mrow)
 
-        # ── position update timer ─────────────────────────────────
         self._timer = QTimer()
         self._timer.setInterval(250)
         if HAS_MULTIMEDIA:
             self._timer.timeout.connect(self._sync_scrub)
         self._timer.start()
 
-    # ── public API ────────────────────────────────────────────────
-
     def load(self, path: str):
-        if not HAS_MULTIMEDIA:
-            return
+        if not HAS_MULTIMEDIA: return
         self._loaded = True
         self._player.setSource(QUrl.fromLocalFile(path))
         self._player.pause()
-        self._play_btn.setText("▶  Play")
 
     def load_url(self, url: str):
-        """Load a remote/streaming URL (e.g. direct YouTube stream) into the player."""
-        if not HAS_MULTIMEDIA:
-            return
+        if not HAS_MULTIMEDIA: return
         self._loaded = True
         self._player.setSource(QUrl(url))
         self._player.pause()
-        self._play_btn.setText("▶  Play")
 
     def unload(self):
-        if not HAS_MULTIMEDIA:
-            return
+        if not HAS_MULTIMEDIA: return
         self._loaded = False
         self._player.stop()
         self._player.setSource(QUrl())
-        self._scrub.setValue(0)
-        self._pos_lbl.setText("00:00:00 / 00:00:00")
-        self._play_btn.setText("▶  Play")
-        self._start_marker_lbl.setText("▶ Start: —")
-        self._end_marker_lbl.setText("⏹ End: —")
-
-    # ── slots ─────────────────────────────────────────────────────
 
     def _toggle_play(self):
-        if not HAS_MULTIMEDIA or not self._loaded:
-            return
+        if not HAS_MULTIMEDIA or not self._loaded: return
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self._player.pause()
             self._play_btn.setText("▶  Play")
@@ -906,21 +775,17 @@ class VideoPreview(QWidget):
         self._duration_ms = ms
 
     def _sync_scrub(self):
-        if not HAS_MULTIMEDIA or not self._loaded or self._dragging:
-            return
+        if not HAS_MULTIMEDIA or not self._loaded or self._dragging: return
         if self._duration_ms > 0:
-            pos = self._player.position()
-            val = int(pos / self._duration_ms * 10000)
+            val = int(self._player.position() / self._duration_ms * 10000)
             self._scrub.setValue(val)
 
     def _on_scrub_press(self):
         self._dragging = True
-        if HAS_MULTIMEDIA:
-            self._player.pause()
+        if HAS_MULTIMEDIA: self._player.pause()
 
     def _on_scrub_move(self, val: int):
-        if not HAS_MULTIMEDIA or not self._loaded or self._duration_ms == 0:
-            return
+        if not HAS_MULTIMEDIA or not self._loaded or self._duration_ms == 0: return
         ms = int(val / 10000 * self._duration_ms)
         self._player.setPosition(ms)
         self._on_position(ms)
@@ -929,10 +794,8 @@ class VideoPreview(QWidget):
         self._dragging = False
 
     def _current_hms(self) -> str:
-        if not HAS_MULTIMEDIA:
-            return "00:00:00"
-        ms = self._player.position()
-        return sec_to_hms(ms / 1000.0)
+        if not HAS_MULTIMEDIA: return "00:00:00"
+        return sec_to_hms(self._player.position() / 1000.0)
 
     def _set_start(self):
         t = self._current_hms()
@@ -950,19 +813,17 @@ class VideoPreview(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VideoSlicer  v2")
+        self.setWindowTitle("VideoSlicer  v2.1 — ULTRA FAST")
         self.resize(780, 940)
         self.setMinimumSize(680, 760)
         self.setStyleSheet(QSS)
 
-        self._worker        = None
-        self._src_file      = ""
+        self._worker = None
+        self._src_file = ""
         self._yt_fetch_worker = None
 
         self._build()
         self._check_deps()
-
-    # ── Build UI ──────────────────────────────────────────────────
 
     def _build(self):
         root = QWidget()
@@ -972,16 +833,10 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # ── header ────────────────────────────────────────────────
+        # Header (same as original)
         hdr = QWidget()
         hdr.setFixedHeight(72)
-        hdr.setStyleSheet(f"""
-            background: qlineargradient(
-                x1:0,y1:0, x2:1,y2:0,
-                stop:0 #0A0F1E, stop:0.6 #0D1628, stop:1 #0A1020
-            );
-            border-bottom: 1px solid {BORDER};
-        """)
+        hdr.setStyleSheet(f"background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #0A0F1E, stop:0.6 #0D1628, stop:1 #0A1020); border-bottom: 1px solid {BORDER};")
         hl = QHBoxLayout(hdr)
         hl.setContentsMargins(28, 0, 28, 0)
 
@@ -991,269 +846,158 @@ class MainWindow(QMainWindow):
         hl.addWidget(icon_lbl)
 
         title_col = QVBoxLayout()
-        title_col.setSpacing(0)
         t1 = QLabel("VideoSlicer")
         t1.setFont(QFont(FONT_MAIN, 17, QFont.Weight.Bold))
         t1.setStyleSheet(f"color: {TEXT};")
-        t2 = QLabel("preview · seek · set markers · zero quality loss")
+        t2 = QLabel("ultra-fast • direct stream • zero quality loss")
         t2.setFont(QFont(FONT_MAIN, 9))
         t2.setStyleSheet(f"color: {MUTED};")
         title_col.addWidget(t1)
         title_col.addWidget(t2)
         hl.addLayout(title_col)
         hl.addStretch()
-
-        deps_col = QVBoxLayout()
-        deps_col.setSpacing(2)
-        deps_col.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self._dep_ffmpeg = self._dep_badge("FFmpeg",  have("ffmpeg"))
-        self._dep_ytdlp  = self._dep_badge("yt-dlp",
-                            have("yt-dlp") or self._have_ytdlp_module())
-        self._dep_media  = self._dep_badge("Preview", HAS_MULTIMEDIA)
-        deps_col.addWidget(self._dep_ffmpeg)
-        deps_col.addWidget(self._dep_ytdlp)
-        deps_col.addWidget(self._dep_media)
-        hl.addLayout(deps_col)
-
         outer.addWidget(hdr)
 
-        # ── scrollable body ───────────────────────────────────────
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         outer.addWidget(scroll)
 
         body = QWidget()
-        body.setObjectName("root")
-        scroll.setWidget(body)
         lay = QVBoxLayout(body)
         lay.setContentsMargins(24, 20, 24, 20)
         lay.setSpacing(14)
+        scroll.setWidget(body)
 
-        # ── SOURCE card ───────────────────────────────────────────
+        # SOURCE
         src_card = Card("SOURCE")
         lay.addWidget(src_card)
         sb = src_card.body()
 
-        self._src_tab = TabPill([
-            ("📁  Local File",  "file"),
-            ("▶  YouTube URL", "youtube"),
-        ])
+        self._src_tab = TabPill([("📁  Local File", "file"), ("▶  YouTube URL", "youtube")])
         self._src_tab.changed.connect(self._toggle_src)
         sb.addWidget(self._src_tab)
 
         self._src_stack = QStackedWidget()
         sb.addWidget(self._src_stack)
 
-        # page 0 — drop zone
+        # Local file
         fp = QWidget()
-        fp.setStyleSheet("background: transparent;")
         fl = QVBoxLayout(fp)
-        fl.setContentsMargins(0, 0, 0, 0)
         self._drop = DropZone()
         self._drop.file_dropped.connect(self._on_file)
         fl.addWidget(self._drop)
         self._src_stack.addWidget(fp)
 
-        # page 1 — youtube url
+        # YouTube
         yp = QWidget()
-        yp.setStyleSheet("background: transparent;")
         yl = QVBoxLayout(yp)
-        yl.setContentsMargins(0, 0, 0, 0)
-        yl.setSpacing(8)
-
         yt_row = QHBoxLayout()
-        yt_row.setSpacing(8)
         self._yt_edit = QLineEdit()
         self._yt_edit.setPlaceholderText("https://www.youtube.com/watch?v=…")
         self._yt_edit.setFixedHeight(44)
         yt_row.addWidget(self._yt_edit)
 
         self._yt_preview_btn = SmallButton("⏵  Load Preview")
-        self._yt_preview_btn.setFixedHeight(44)
         self._yt_preview_btn.setFixedWidth(130)
         self._yt_preview_btn.clicked.connect(self._load_yt_preview)
         yt_row.addWidget(self._yt_preview_btn)
         yl.addLayout(yt_row)
-
         self._yt_status_lbl = QLabel("")
-        self._yt_status_lbl.setFont(QFont(FONT_MONO, 9))
-        self._yt_status_lbl.setStyleSheet(f"color: {MUTED};")
         self._yt_status_lbl.setWordWrap(True)
         yl.addWidget(self._yt_status_lbl)
-
-        yl.addStretch()
         self._src_stack.addWidget(yp)
 
-        # ── VIDEO PREVIEW ─────────────────────────────────────────
+        # Preview
         self._preview = VideoPreview()
         self._preview.start_set.connect(self._on_preview_start)
         self._preview.end_set.connect(self._on_preview_end)
-        self._preview.setVisible(False)   # shown only once a file is loaded
+        self._preview.setVisible(False)
         lay.addWidget(self._preview)
 
-        # ── TIME RANGE card ───────────────────────────────────────
+        # Time Range
         tr_card = Card("TIME RANGE")
         lay.addWidget(tr_card)
         tb = tr_card.body()
-
-        hint_preview = QLabel(
-            "💡  Load a local file or paste a YouTube URL and click  ⏵ Load Preview  "
-            "→ scrub the video → click  ⬅ Set Start  and  Set End ➡  to fill these automatically"
-        )
-        hint_preview.setFont(QFont(FONT_MAIN, 9))
-        hint_preview.setStyleSheet(f"color: {MUTED}; font-style: italic;")
-        hint_preview.setWordWrap(True)
-        tb.addWidget(hint_preview)
-
         tr_row = QHBoxLayout()
-        tr_row.setSpacing(16)
         self._from = TimeInput("FROM", "00:00:00")
-        self._to   = TimeInput("TO",   "00:00:00")
+        self._to = TimeInput("TO", "00:00:00")
         self._from.changed.connect(self._update_dur)
         self._to.changed.connect(self._update_dur)
         tr_row.addWidget(self._from)
-
-        arrow = QLabel("→")
-        arrow.setFont(QFont(FONT_MAIN, 20))
-        arrow.setStyleSheet(f"color: {BORDER2};")
-        arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        arrow.setFixedWidth(32)
-        arrow.setContentsMargins(0, 18, 0, 0)
-        tr_row.addWidget(arrow)
+        tr_row.addWidget(QLabel("→"))
         tr_row.addWidget(self._to)
         tb.addLayout(tr_row)
 
         self._dur_lbl = QLabel("Duration: —")
-        self._dur_lbl.setFont(QFont(FONT_MAIN, 10))
-        self._dur_lbl.setStyleSheet(f"color: {MUTED};")
         tb.addWidget(self._dur_lbl)
 
-        hint = QLabel("Examples:  02:04:10  ·  1:30:00  ·  45:30  ·  3720")
-        hint.setFont(QFont(FONT_MONO, 9))
-        hint.setStyleSheet(f"color: {MUTED};")
-        tb.addWidget(hint)
-
-        # ── OUTPUT card ───────────────────────────────────────────
+        # Output
         out_card = Card("OUTPUT")
         lay.addWidget(out_card)
         ob = out_card.body()
-
         fol_row = QHBoxLayout()
-        fol_row.setSpacing(8)
         self._out_edit = QLineEdit(str(Path.home() / "Desktop"))
-        self._out_edit.setFixedHeight(40)
         fol_row.addWidget(self._out_edit)
         fol_btn = SmallButton("Browse")
-        fol_btn.setFixedWidth(80)
         fol_btn.clicked.connect(self._browse_out)
         fol_row.addWidget(fol_btn)
         ob.addLayout(fol_row)
 
         name_row = QHBoxLayout()
-        name_row.setSpacing(8)
-        name_lbl = QLabel("Filename:")
-        name_lbl.setFont(QFont(FONT_MAIN, 10))
-        name_lbl.setStyleSheet(f"color: {MUTED2};")
-        name_lbl.setFixedWidth(80)
-        name_row.addWidget(name_lbl)
+        name_row.addWidget(QLabel("Filename:"))
         self._name_edit = QLineEdit("clip_output.mp4")
-        self._name_edit.setFixedHeight(40)
         name_row.addWidget(self._name_edit)
         ob.addLayout(name_row)
 
-        # ── Action row ────────────────────────────────────────────
+        # Action
         act = QHBoxLayout()
-        act.setSpacing(10)
-        self._run_btn = GlowButton("▶   Slice Video", accent=True)
-        self._run_btn.setFixedHeight(50)
-        self._run_btn.setFont(QFont(FONT_MAIN, 13, QFont.Weight.Bold))
+        self._run_btn = GlowButton("▶   Slice Video")
         self._run_btn.clicked.connect(self._start)
         act.addWidget(self._run_btn)
 
         self._cancel_btn = GlowButton("✕  Cancel", danger=True)
-        self._cancel_btn.setFixedWidth(110)
-        self._cancel_btn.setFixedHeight(50)
         self._cancel_btn.setEnabled(False)
         self._cancel_btn.clicked.connect(self._cancel)
         act.addWidget(self._cancel_btn)
         lay.addLayout(act)
 
         self._status_lbl = QLabel("")
-        self._status_lbl.setFont(QFont(FONT_MAIN, 10))
-        self._status_lbl.setStyleSheet(f"color: {MUTED};")
         lay.addWidget(self._status_lbl)
 
         self._progress = QProgressBar()
-        self._progress.setFixedHeight(12)
-        self._progress.setTextVisible(False)
-        self._progress.setValue(0)
         lay.addWidget(self._progress)
 
-        # ── Log card ──────────────────────────────────────────────
+        # Log
         log_card = Card("LOG")
         lay.addWidget(log_card)
         lb = log_card.body()
-
-        clr_row = QHBoxLayout()
-        clr_row.addStretch()
         clr_btn = SmallButton("Clear")
-        clr_btn.setFixedWidth(64)
         clr_btn.clicked.connect(self._clear_log)
-        clr_row.addWidget(clr_btn)
-        lb.addLayout(clr_row)
+        lb.addWidget(clr_btn)
 
         self._log = QTextEdit()
         self._log.setReadOnly(True)
-        self._log.setMinimumHeight(150)
         lb.addWidget(self._log)
-
-        lay.addSpacing(8)
-
-    # ── Helpers ───────────────────────────────────────────────────
-
-    def _dep_badge(self, name, ok):
-        col = SUCCESS if ok else DANGER
-        sym = "✔" if ok else "✗"
-        lbl = QLabel(f"{sym}  {name}")
-        lbl.setFont(QFont(FONT_MONO, 9))
-        lbl.setStyleSheet(f"color: {col};")
-        lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
-        return lbl
-
-    def _have_ytdlp_module(self):
-        try:
-            import yt_dlp
-            return True
-        except ImportError:
-            return False
 
     def _toggle_src(self, val):
         self._src_stack.setCurrentIndex(0 if val == "file" else 1)
-        # unload preview only when switching away from youtube (to file), not the other way
         if val == "file":
             self._preview.unload()
             self._preview.setVisible(False)
-            self._yt_status_lbl.setText("")
 
     def _load_yt_preview(self):
         url = self._yt_edit.text().strip()
         if not url.startswith("http"):
-            self._yt_status_lbl.setStyleSheet(f"color: {DANGER};")
-            self._yt_status_lbl.setText("⚠  Enter a valid YouTube URL first.")
+            self._yt_status_lbl.setText("⚠ Enter a valid YouTube URL")
             return
         if not HAS_MULTIMEDIA:
-            self._yt_status_lbl.setStyleSheet(f"color: {WARN};")
-            self._yt_status_lbl.setText(
-                "⚠  Preview unavailable — install PyQt6-Qt6Multimedia"
-            )
+            self._yt_status_lbl.setText("⚠ Preview requires PyQt6-Qt6Multimedia")
             return
 
         self._yt_preview_btn.setEnabled(False)
-        self._yt_status_lbl.setStyleSheet(f"color: {ACCENT};")
-        self._yt_status_lbl.setText("⏳  Resolving stream URL via yt-dlp…")
         self._preview.unload()
-        self._preview.setVisible(False)
+        self._yt_status_lbl.setText("⏳ Resolving stream...")
 
         self._yt_fetch_worker = YtFetchUrlWorker(url)
         self._yt_fetch_worker.ready.connect(self._on_yt_preview_ready)
@@ -1262,53 +1006,35 @@ class MainWindow(QMainWindow):
 
     def _on_yt_preview_ready(self, stream_url: str):
         self._yt_preview_btn.setEnabled(True)
-        self._yt_status_lbl.setStyleSheet(f"color: {SUCCESS};")
-        self._yt_status_lbl.setText("✔  Stream resolved — scrub below to set markers")
-        # derive a filename from the URL if output name is still default
-        if self._name_edit.text() == "clip_output.mp4":
-            self._name_edit.setText("youtube_clip.mp4")
+        self._yt_status_lbl.setText("✔ Stream resolved")
         self._preview.setVisible(True)
         self._preview.load_url(stream_url)
 
     def _on_yt_preview_failed(self, err: str):
         self._yt_preview_btn.setEnabled(True)
-        self._yt_status_lbl.setStyleSheet(f"color: {DANGER};")
-        self._yt_status_lbl.setText(f"✗  {err}")
+        self._yt_status_lbl.setText(f"✗ {err}")
 
     def _on_file(self, path: str):
         self._src_file = path
-        stem = Path(path).stem
-        self._name_edit.setText(f"{stem}_clip.mp4")
-        # show and load the preview player
+        self._name_edit.setText(f"{Path(path).stem}_clip.mp4")
         self._preview.setVisible(True)
         self._preview.load(path)
 
     def _on_preview_start(self, t: str):
-        """Called when user clicks ⬅ Set Start in the preview."""
         self._from.set_value(t)
 
     def _on_preview_end(self, t: str):
-        """Called when user clicks Set End ➡ in the preview."""
         self._to.set_value(t)
 
     def _update_dur(self):
         try:
             d = hms_to_sec(self._to.value()) - hms_to_sec(self._from.value())
-            if d > 0:
-                self._dur_lbl.setText(f"Duration: {duration_label(d)}")
-                self._dur_lbl.setStyleSheet(f"color: {ACCENT};")
-            else:
-                self._dur_lbl.setText("Duration: —  (check times)")
-                self._dur_lbl.setStyleSheet(f"color: {DANGER};")
-        except Exception:
+            self._dur_lbl.setText(f"Duration: {duration_label(d)}" if d > 0 else "Duration: —")
+        except:
             self._dur_lbl.setText("Duration: —")
-            self._dur_lbl.setStyleSheet(f"color: {MUTED};")
 
     def _browse_out(self):
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select output folder",
-            self._out_edit.text() or str(Path.home() / "Desktop"),
-        )
+        folder = QFileDialog.getExistingDirectory(self, "Select output folder", self._out_edit.text())
         if folder:
             self._out_edit.setText(folder)
 
@@ -1326,47 +1052,24 @@ class MainWindow(QMainWindow):
         self._status_lbl.setStyleSheet(f"color: {col};")
 
     def _check_deps(self):
-        missing = []
         if not have("ffmpeg"):
-            missing.append("FFmpeg  →  https://ffmpeg.org/download.html")
-        if not (have("yt-dlp") or self._have_ytdlp_module()):
-            missing.append("yt-dlp  →  pip install yt-dlp")
-        if not HAS_MULTIMEDIA:
-            missing.append("Preview →  pip install PyQt6-Qt6Multimedia")
-        if missing:
-            self._log_line("⚠  Missing optional tools:", WARN)
-            for m in missing:
-                self._log_line(f"   • {m}", MUTED2)
-            self._log_line("", None)
-        else:
-            self._log_line("✔  All dependencies found — ready.", SUCCESS)
-
-    # ── Run / Cancel ──────────────────────────────────────────────
+            self._log_line("⚠ FFmpeg not found. Please install FFmpeg.", WARN)
 
     def _start(self):
-        if self._worker and self._worker.isRunning():
-            return
-
         mode = self._src_tab.value()
-        src  = self._src_file if mode == "file" else self._yt_edit.text().strip()
+        src = self._src_file if mode == "file" else self._yt_edit.text().strip()
 
         if not src:
             self._set_status("No source selected.", DANGER)
             return
-        if mode == "file" and not Path(src).is_file():
-            self._set_status("File not found.", DANGER)
-            return
-        if mode == "youtube" and not src.startswith("http"):
-            self._set_status("Enter a valid YouTube URL.", DANGER)
-            return
 
         task = {
-            "mode":    mode,
-            "source":  src,
-            "from":    self._from.value(),
-            "to":      self._to.value(),
+            "mode": mode,
+            "source": src,
+            "from": self._from.value(),
+            "to": self._to.value(),
             "out_dir": self._out_edit.text().strip(),
-            "name":    self._name_edit.text().strip(),
+            "name": self._name_edit.text().strip(),
         }
 
         self._worker = Worker(task)
@@ -1375,82 +1078,27 @@ class MainWindow(QMainWindow):
         self._worker.status.connect(self._set_status)
         self._worker.done.connect(self._on_done)
 
-        self._set_working(True)
-        self._progress.setRange(0, 0)
-        self._log_line(f"\n⚡  Starting …", ACCENT)
+        self._run_btn.setEnabled(False)
+        self._cancel_btn.setEnabled(True)
+        self._progress.setRange(0, 100)
         self._worker.start()
 
     def _on_progress(self, pct: float):
-        if self._progress.maximum() == 0:
-            self._progress.setRange(0, 100)
         self._progress.setValue(int(pct))
 
     def _cancel(self):
         if self._worker:
             self._worker.cancel()
-        self._set_status("Cancelled.", DANGER)
-        self._set_working(False)
+        self._run_btn.setEnabled(True)
+        self._cancel_btn.setEnabled(False)
 
     def _on_done(self, ok: bool, out: str):
-        self._set_working(False)
-        self._progress.setRange(0, 100)
+        self._run_btn.setEnabled(True)
+        self._cancel_btn.setEnabled(False)
         if ok:
             self._progress.setValue(100)
-            self._log_line(f"\n✅  Saved to: {out}", SUCCESS)
-            self._set_status("Done! ✓", SUCCESS)
-            self._show_done_overlay(out)
-        else:
-            self._progress.setValue(0)
-
-    def _set_working(self, busy: bool):
-        self._cancel_btn.setEnabled(busy)
-        if busy:
-            self._run_btn.setEnabled(False)
-            self._run_btn.setText("⏳  Slicing…")
-            self._run_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: {BORDER};
-                    color: {MUTED};
-                    border: 1.5px solid {BORDER2};
-                    border-radius: 8px;
-                    font-family: "{FONT_MAIN}";
-                    font-size: 13px;
-                    font-weight: 700;
-                    padding: 0 22px;
-                }}
-            """)
-        else:
-            self._run_btn.setEnabled(True)
-            self._run_btn.setText("▶   Slice Video")
-            self._run_btn._style()
-
-    def _show_done_overlay(self, path: str):
-        from PyQt6.QtWidgets import QMessageBox
-        mb = QMessageBox(self)
-        mb.setWindowTitle("Done!")
-        mb.setText(f"<b style='color:#10B981;font-size:15px'>✅  Clip saved!</b>")
-        mb.setInformativeText(path)
-        mb.setStyleSheet(f"""
-            QMessageBox {{ background: {CARD}; color: {TEXT}; font-family: "{FONT_MAIN}"; }}
-            QLabel {{ color: {TEXT}; }}
-            QPushButton {{
-                background: {ACCENT}; color: {BG};
-                border: none; border-radius: 6px;
-                font-weight: bold; padding: 6px 18px; min-width: 80px;
-            }}
-            QPushButton:hover {{ background: {ACCENT_L}; }}
-        """)
-        open_btn = mb.addButton("Open Folder", QMessageBox.ButtonRole.AcceptRole)
-        mb.addButton("OK", QMessageBox.ButtonRole.RejectRole)
-        mb.exec()
-        if mb.clickedButton() == open_btn:
-            folder = str(Path(path).parent)
-            if sys.platform == "win32":
-                os.startfile(folder)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", folder])
-            else:
-                subprocess.Popen(["xdg-open", folder])
+            self._log_line(f"\n✅ Saved: {out}", SUCCESS)
+            self._set_status("Done!", SUCCESS)
 
 
 # ── Entry point ────────────────────────────────────────────────────
@@ -1461,14 +1109,10 @@ def main():
     app.setStyle("Fusion")
 
     pal = QPalette()
-    pal.setColor(QPalette.ColorRole.Window,          QColor(BG))
-    pal.setColor(QPalette.ColorRole.WindowText,      QColor(TEXT))
-    pal.setColor(QPalette.ColorRole.Base,            QColor(SURFACE))
-    pal.setColor(QPalette.ColorRole.Text,            QColor(TEXT))
-    pal.setColor(QPalette.ColorRole.Button,          QColor(CARD))
-    pal.setColor(QPalette.ColorRole.ButtonText,      QColor(TEXT))
-    pal.setColor(QPalette.ColorRole.Highlight,       QColor(ACCENT))
-    pal.setColor(QPalette.ColorRole.HighlightedText, QColor(BG))
+    pal.setColor(QPalette.ColorRole.Window, QColor(BG))
+    pal.setColor(QPalette.ColorRole.WindowText, QColor(TEXT))
+    pal.setColor(QPalette.ColorRole.Base, QColor(SURFACE))
+    pal.setColor(QPalette.ColorRole.Text, QColor(TEXT))
     app.setPalette(pal)
 
     win = MainWindow()
