@@ -3,7 +3,7 @@
 VideoSlicer  v2.1 — ULTRA FAST
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Precision video cutter — local files or YouTube, zero quality loss.
-Now with direct stream + FFmpeg remote seeking for maximum speed.
+Improved log filtering and YouTube stream stability.
 """
 
 import os
@@ -13,12 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import (
-    Qt, QThread, QTimer, QUrl, pyqtSignal,
-)
-from PyQt6.QtGui import (
-    QColor, QDragEnterEvent, QDropEvent, QFont, QPalette,
-)
+from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDragEnterEvent, QDropEvent, QFont, QPalette
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QProgressBar,
@@ -26,7 +22,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget, QSlider,
 )
 
-# Optional — gracefully disabled if PyQt6-Qt6Multimedia not installed
+# Optional Multimedia Support
 try:
     from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
     from PyQt6.QtMultimediaWidgets import QVideoWidget
@@ -60,86 +56,18 @@ QSS = f"""
 QMainWindow {{ background: {BG}; }}
 QWidget#root {{ background: {BG}; }}
 QScrollArea {{ background: transparent; border: none; }}
-QScrollBar:vertical {{
-    background: {SURFACE}; width: 6px; border-radius: 3px;
-}}
-QScrollBar::handle:vertical {{
-    background: {BORDER2}; border-radius: 3px; min-height: 30px;
-}}
+QScrollBar:vertical {{ background: {SURFACE}; width: 6px; border-radius: 3px; }}
+QScrollBar::handle:vertical {{ background: {BORDER2}; border-radius: 3px; min-height: 30px; }}
 QScrollBar::handle:vertical:hover {{ background: {ACCENT}; }}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
-QLabel {{ color: {TEXT}; background: transparent; }}
-QLineEdit {{
-    background: {SURFACE};
-    border: 1.5px solid {BORDER};
-    border-radius: 8px;
-    color: {TEXT};
-    padding: 9px 14px;
-    font-family: "{FONT_MONO}";
-    font-size: 13px;
-    selection-background-color: {ACCENT};
-    selection-color: {BG};
-}}
-QLineEdit:focus {{ border: 1.5px solid {ACCENT}; background: #0F1829; }}
-QLineEdit:hover {{ border: 1.5px solid {BORDER2}; }}
-QLineEdit[readOnly="true"] {{ color: {MUTED2}; background: {CARD}; }}
-QTextEdit {{
-    background: #050810;
-    border: 1px solid {BORDER};
-    border-radius: 8px;
-    color: #7EE787;
-    font-family: "{FONT_MONO}";
-    font-size: 11px;
-    padding: 8px;
-    selection-background-color: {BLUE};
-}}
-QProgressBar {{
-    background: {SURFACE};
-    border: 1px solid {BORDER};
-    border-radius: 6px;
-    height: 12px;
-    text-align: center;
-    color: transparent;
-}}
-QProgressBar::chunk {{
-    background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-        stop:0 {ACCENT_D}, stop:1 {ACCENT_L});
-    border-radius: 6px;
-}}
-QSlider::groove:horizontal {{
-    background: {BORDER};
-    height: 4px;
-    border-radius: 2px;
-}}
-QSlider::sub-page:horizontal {{
-    background: {ACCENT};
-    height: 4px;
-    border-radius: 2px;
-}}
-QSlider::handle:horizontal {{
-    background: {ACCENT_L};
-    border: 2px solid {ACCENT_D};
-    width: 14px;
-    height: 14px;
-    margin: -5px 0;
-    border-radius: 7px;
-}}
-QSlider::handle:horizontal:hover {{
-    background: white;
-}}
-QToolTip {{
-    background: {CARD2};
-    color: {TEXT};
-    border: 1px solid {BORDER2};
-    border-radius: 4px;
-    padding: 4px 8px;
-    font-size: 11px;
-}}
+QLabel {{ color: {TEXT}; }}
+QLineEdit {{ background: {SURFACE}; border: 1.5px solid {BORDER}; border-radius: 8px; color: {TEXT}; padding: 9px 14px; }}
+QLineEdit:focus {{ border: 1.5px solid {ACCENT}; }}
+QTextEdit {{ background: #050810; border: 1px solid {BORDER}; border-radius: 8px; color: #7EE787; font-family: "{FONT_MONO}"; padding: 8px; }}
+QProgressBar {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 6px; }}
+QProgressBar::chunk {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {ACCENT_D}, stop:1 {ACCENT_L}); }}
 """
 
-
 # ── Helpers ────────────────────────────────────────────────────────
-
 def hms_to_sec(s: str) -> float:
     s = s.strip()
     p = s.split(":")
@@ -148,7 +76,7 @@ def hms_to_sec(s: str) -> float:
         elif len(p) == 2: return int(p[0])*60 + float(p[1])
         else:             return float(s)
     except ValueError:
-        raise ValueError(f"Bad time format: '{s}' — use HH:MM:SS")
+        raise ValueError(f"Bad time format: '{s}'")
 
 def sec_to_hms(sec: float) -> str:
     sec = max(0, int(sec))
@@ -170,8 +98,7 @@ def have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
-# ── Worker thread (ULTRA FAST) ─────────────────────────────────────
-
+# ── Worker Thread ──────────────────────────────────────────────────
 class Worker(QThread):
     log      = pyqtSignal(str, str)
     progress = pyqtSignal(float)
@@ -180,15 +107,15 @@ class Worker(QThread):
 
     def __init__(self, task: dict):
         super().__init__()
-        self._task   = task
+        self._task = task
         self._cancel = False
-        self._proc   = None
+        self._proc = None
 
     def cancel(self):
         self._cancel = True
         if self._proc:
             try: self._proc.terminate()
-            except Exception: pass
+            except: pass
 
     def run(self):
         try:
@@ -196,32 +123,30 @@ class Worker(QThread):
             if not self._cancel:
                 self.done.emit(True, out)
         except Exception as e:
-            self.log.emit(f"\n✗  {e}", DANGER)
+            self.log.emit(f"\n✗ {e}", DANGER)
             self.done.emit(False, "")
 
     def _execute(self) -> str:
-        t      = self._task
-        mode   = t["mode"]
+        t = self._task
         t_from = hms_to_sec(t["from"])
-        t_to   = hms_to_sec(t["to"])
-        dur    = t_to - t_from
+        t_to = hms_to_sec(t["to"])
+        dur = t_to - t_from
         if dur <= 0:
             raise ValueError("'To' time must be after 'From' time.")
 
-        out_dir  = Path(t["out_dir"])
-        name     = t["name"]
+        out_dir = Path(t["out_dir"])
+        name = t["name"]
         if not name.lower().endswith(".mp4"):
             name += ".mp4"
         out_path = str(out_dir / name)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        self.log.emit(f"{'─'*52}", MUTED)
-        self.log.emit(f"  Range  : {sec_to_hms(t_from)} → {sec_to_hms(t_to)}"
-                      f"  ({duration_label(dur)})", TEXT)
+        self.log.emit(f"{'─'*60}", MUTED)
+        self.log.emit(f"  Range  : {sec_to_hms(t_from)} → {sec_to_hms(t_to)}  ({duration_label(dur)})", TEXT)
         self.log.emit(f"  Output : {out_path}", TEXT)
-        self.log.emit(f"{'─'*52}\n", MUTED)
+        self.log.emit(f"{'─'*60}\n", MUTED)
 
-        if mode == "file":
+        if t["mode"] == "file":
             self._slice_local(t["source"], t_from, dur, out_path)
         else:
             self._slice_youtube(t["source"], t_from, dur, out_path)
@@ -230,33 +155,14 @@ class Worker(QThread):
 
     def _slice_local(self, src, t_from, dur, out):
         self.status.emit("⚡ Ultra-fast local slicing …", ACCENT)
-        self.log.emit(
-            "⚙ FFmpeg zero-loss local slicing\n"
-            "   • -ss before -i (instant seek)\n"
-            "   • Stream copy\n"
-            "   • Fast MP4\n", MUTED)
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-ss", str(t_from),
-            "-i", src,
-            "-t", str(dur),
-            "-c", "copy",
-            "-avoid_negative_ts", "make_zero",
-            "-movflags", "+faststart",
-            out,
-        ]
+        cmd = ["ffmpeg", "-y", "-ss", str(t_from), "-i", src, "-t", str(dur),
+               "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", out]
         self._run(cmd, dur)
 
     def _slice_youtube(self, url, t_from, dur, out):
         self.status.emit("⚡ Resolving direct stream URL …", ACCENT)
-        self.log.emit(
-            "🚀 ULTRA-FAST YouTube Mode:\n"
-            "   • Direct progressive MP4\n"
-            "   • FFmpeg remote seeking\n"
-            "   • No fragment reconstruction\n", SUCCESS)
+        self.log.emit("🚀 ULTRA-FAST YouTube Mode", SUCCESS)
 
-        # Get direct stream URL
         get_url_cmd = [
             sys.executable, "-m", "yt_dlp",
             "-f", "best[ext=mp4]/best",
@@ -264,22 +170,14 @@ class Worker(QThread):
             "--no-warnings",
             "--no-playlist",
             "--no-check-certificates",
-            "--no-write-info-json",
             url
         ]
 
         browser = self._task.get("browser", "None (no cookies)")
         if browser and browser != "None (no cookies)":
             get_url_cmd += ["--cookies-from-browser", browser]
-            self.log.emit(f"🍪 Using {browser} cookies\n", MUTED)
 
-        try:
-            result = subprocess.run(
-                get_url_cmd, capture_output=True, text=True, timeout=45
-            )
-        except subprocess.TimeoutExpired:
-            raise ValueError("Timed out resolving YouTube stream URL")
-
+        result = subprocess.run(get_url_cmd, capture_output=True, text=True, timeout=45)
         if result.returncode != 0:
             raise ValueError(result.stderr.strip() or "Failed to resolve stream URL")
 
@@ -287,31 +185,24 @@ class Worker(QThread):
         if not stream_url:
             raise ValueError("No stream URL returned")
 
-        self.log.emit("✅ Direct stream URL resolved\n", SUCCESS)
+        self.log.emit("✅ Direct stream URL resolved", SUCCESS)
 
-        # FFmpeg ultra-fast remote slicing
-        self.status.emit("⚡ Downloading & slicing range …", ACCENT)
         cmd = [
             "ffmpeg", "-y",
-            "-threads", "0",
-            "-multiple_requests", "1",
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "5",
+            "-threads", "0", "-multiple_requests", "1",
+            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
             "-ss", str(t_from),
             "-i", stream_url,
             "-t", str(dur),
             "-c", "copy",
             "-avoid_negative_ts", "make_zero",
             "-movflags", "+faststart",
-            out,
+            out
         ]
         self._run(cmd, dur)
 
     def _run(self, cmd, duration):
-        self.log.emit("  $ " + " ".join(
-            f'"{c}"' if " " in str(c) else str(c) for c in cmd
-        ) + "\n", MUTED)
+        self.log.emit("  $ " + " ".join(f'"{c}"' if " " in str(c) else str(c) for c in cmd) + "\n", MUTED)
 
         try:
             self._proc = subprocess.Popen(
@@ -324,9 +215,12 @@ class Worker(QThread):
         except FileNotFoundError:
             raise ValueError("FFmpeg not found — install and add to PATH")
 
+        # Strong noise filter
         _NOISE = re.compile(
-            r"Late SEI|ffmpeg-devel|Press \[q\]|Side data|Metadata:|"
-            r"Stream #|encoder : Lavf|googlevideo|Input #|Output #"
+            r"Late SEI|ffmpeg-devel|Press \[q\]|Side data|Metadata:|Stream #|"
+            r"encoder : Lavf|googlevideo|partial file|Demuxing failed|"
+            r"AVPacket with pts|Unable to read from socket|root atom offset|"
+            r"Invalid data found|tls @|qt\.multimedia"
         )
 
         for line in self._proc.stdout:
@@ -337,7 +231,7 @@ class Worker(QThread):
 
             m = re.search(r"time=(\d+):(\d+):([\d.]+)", line)
             if m and duration > 0:
-                el  = int(m.group(1))*3600 + int(m.group(2))*60 + float(m.group(3))
+                el = int(m.group(1))*3600 + int(m.group(2))*60 + float(m.group(3))
                 pct = min(el / duration * 100, 99)
                 self.progress.emit(pct)
                 self.status.emit(f"Processing … {pct:.1f}%", ACCENT)
@@ -352,10 +246,9 @@ class Worker(QThread):
             raise ValueError(f"Process exited with code {rc}")
 
 
-# ── YouTube URL fetcher (for preview) ─────────────────────────────
-
+# ── YouTube Preview Fetcher ───────────────────────────────────────
 class YtFetchUrlWorker(QThread):
-    ready  = pyqtSignal(str)
+    ready = pyqtSignal(str)
     failed = pyqtSignal(str)
 
     def __init__(self, yt_url: str):
@@ -364,42 +257,28 @@ class YtFetchUrlWorker(QThread):
 
     def run(self):
         try:
-            result = subprocess.run(
-                [
-                    sys.executable, "-m", "yt_dlp",
-                    "-f", "best[ext=mp4]/best",
-                    "--get-url",
-                    "--no-warnings",
-                    "--no-playlist",
-                    self._yt_url,
-                ],
-                capture_output=True, text=True, timeout=30,
-            )
+            result = subprocess.run([
+                sys.executable, "-m", "yt_dlp",
+                "-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
+                "--get-url", "--no-warnings", "--no-playlist",
+                self._yt_url
+            ], capture_output=True, text=True, timeout=35)
+
             lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
             if lines:
                 self.ready.emit(lines[0])
             else:
-                err = result.stderr.strip().splitlines()
-                self.failed.emit(err[-1] if err else "yt-dlp returned no URL")
-        except subprocess.TimeoutExpired:
-            self.failed.emit("Timed out fetching YouTube URL")
+                self.failed.emit("No stream URL returned")
         except Exception as e:
             self.failed.emit(str(e))
 
 
-# ── Custom widgets (unchanged) ─────────────────────────────────────
-
+# ── Custom Widgets ─────────────────────────────────────────────────
 class Card(QFrame):
     def __init__(self, title="", parent=None):
         super().__init__(parent)
         self.setObjectName("card")
-        self.setStyleSheet(f"""
-            QFrame#card {{
-                background: {CARD};
-                border: 1px solid {BORDER};
-                border-radius: 12px;
-            }}
-        """)
+        self.setStyleSheet(f"background: {CARD}; border: 1px solid {BORDER}; border-radius: 12px;")
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(20, 16, 20, 18)
         self._layout.setSpacing(12)
@@ -416,44 +295,36 @@ class Card(QFrame):
 class GlowButton(QPushButton):
     def __init__(self, text, accent=True, danger=False, parent=None):
         super().__init__(text, parent)
-        self._accent  = accent
-        self._danger  = danger
+        self._accent = accent
+        self._danger = danger
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumHeight(42)
         self._style()
 
     def _style(self, hover=False):
         if self._danger:
-            bg  = "#7F1D1D" if not hover else "#991B1B"
-            fg  = DANGER
+            bg = "#7F1D1D" if not hover else "#991B1B"
+            fg = DANGER
             brd = "#991B1B"
         elif self._accent:
-            bg  = ACCENT if not hover else ACCENT_L
-            fg  = "#0A0A0A"
+            bg = ACCENT if not hover else ACCENT_L
+            fg = "#0A0A0A"
             brd = ACCENT
         else:
-            bg  = CARD2 if not hover else BORDER
-            fg  = MUTED2
+            bg = CARD2 if not hover else BORDER
+            fg = MUTED2
             brd = BORDER2
         self.setStyleSheet(f"""
-            QPushButton {{
-                background: {bg};
-                color: {fg};
-                border: 1.5px solid {brd};
-                border-radius: 8px;
-                font-family: "{FONT_MAIN}";
-                font-size: 13px;
-                font-weight: 700;
-                padding: 0 22px;
-            }}
+            QPushButton {{ background: {bg}; color: {fg}; border: 1.5px solid {brd};
+                border-radius: 8px; font-weight: 700; padding: 0 22px; }}
         """)
 
     def enterEvent(self, e):
-        self._style(hover=True)
+        self._style(True)
         super().enterEvent(e)
 
     def leaveEvent(self, e):
-        self._style(hover=False)
+        self._style(False)
         super().leaveEvent(e)
 
 
@@ -463,43 +334,20 @@ class SmallButton(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(34)
         self.setStyleSheet(f"""
-            QPushButton {{
-                background: {CARD2};
-                color: {MUTED2};
-                border: 1px solid {BORDER2};
-                border-radius: 7px;
-                font-family: "{FONT_MAIN}";
-                font-size: 12px;
-                font-weight: 600;
-                padding: 0 14px;
-            }}
-            QPushButton:hover {{
-                background: {BORDER};
-                color: {TEXT};
-                border: 1px solid {ACCENT};
-            }}
+            QPushButton {{ background: {CARD2}; color: {MUTED2}; border: 1px solid {BORDER2}; border-radius: 7px; padding: 0 14px; }}
+            QPushButton:hover {{ background: {BORDER}; color: {TEXT}; border: 1px solid {ACCENT}; }}
         """)
 
 
 class MarkerButton(QPushButton):
     def __init__(self, text, color, parent=None):
         super().__init__(text, parent)
-        self._color = color
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(32)
         self.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent;
-                color: {color};
-                border: 1.5px solid {color};
-                border-radius: 6px;
-                font-family: "{FONT_MAIN}";
-                font-size: 11px;
-                font-weight: 700;
-                padding: 0 12px;
-            }}
+            QPushButton {{ background: transparent; color: {color}; border: 1.5px solid {color};
+                border-radius: 6px; padding: 0 12px; }}
             QPushButton:hover {{ background: {color}22; }}
-            QPushButton:pressed {{ background: {color}44; }}
         """)
 
 
@@ -508,8 +356,7 @@ class TabPill(QWidget):
 
     def __init__(self, options: list, parent=None):
         super().__init__(parent)
-        self._options = options
-        self._active  = options[0][1]
+        self._active = options[0][1]
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
@@ -534,16 +381,8 @@ class TabPill(QWidget):
         for val, b in self._btns.items():
             active = val == self._active
             b.setStyleSheet(f"""
-                QPushButton {{
-                    background: {ACCENT if active else CARD2};
-                    color: {"#0A0A0A" if active else MUTED2};
-                    border: 1.5px solid {ACCENT if active else BORDER2};
-                    border-radius: 7px;
-                    font-family: "{FONT_MAIN}";
-                    font-size: 12px;
-                    font-weight: {"700" if active else "500"};
-                    padding: 0 18px;
-                }}
+                QPushButton {{ background: {ACCENT if active else CARD2}; color: {"#0A0A0A" if active else MUTED2};
+                    border: 1.5px solid {ACCENT if active else BORDER2}; border-radius: 7px; padding: 0 18px; font-weight: {"700" if active else "500"}; }}
             """)
             b.setChecked(active)
 
@@ -568,15 +407,9 @@ class DropZone(QLabel):
     def _set_style(self, active: bool):
         col = ACCENT if active else BORDER2
         self.setStyleSheet(f"""
-            QLabel {{
-                background: {"rgba(245,158,11,0.06)" if active else SURFACE};
-                border: 2px dashed {col};
-                border-radius: 10px;
-                color: {MUTED2 if not active else ACCENT};
-                font-family: "{FONT_MAIN}";
-                font-size: 13px;
-                padding: 12px;
-            }}
+            QLabel {{ background: {"rgba(245,158,11,0.06)" if active else SURFACE};
+                border: 2px dashed {col}; border-radius: 10px;
+                color: {MUTED2 if not active else ACCENT}; padding: 12px; }}
         """)
 
     def dragEnterEvent(self, e: QDragEnterEvent):
@@ -596,10 +429,9 @@ class DropZone(QLabel):
             self.file_dropped.emit(path)
 
     def mousePressEvent(self, e):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select video file", str(Path.home() / "Desktop"),
-            "Video Files (*.mp4 *.mkv *.avi *.mov *.webm *.flv *.ts *.m4v);;All Files (*)",
-        )
+        path, _ = QFileDialog.getOpenFileName(self, "Select video file",
+            str(Path.home() / "Desktop"),
+            "Video Files (*.mp4 *.mkv *.avi *.mov *.webm *.flv *.ts *.m4v);;All Files (*)")
         if path:
             self._show_file(path)
             self.file_dropped.emit(path)
@@ -608,17 +440,7 @@ class DropZone(QLabel):
         name = Path(path).name
         size = Path(path).stat().st_size / (1024**3)
         self.setText(f"✅  {name}\n{size:.2f} GB")
-        self.setStyleSheet(f"""
-            QLabel {{
-                background: rgba(16,185,129,0.06);
-                border: 2px solid {SUCCESS};
-                border-radius: 10px;
-                color: {SUCCESS};
-                font-family: "{FONT_MONO}";
-                font-size: 12px;
-                padding: 12px;
-            }}
-        """)
+        self.setStyleSheet(f"background: rgba(16,185,129,0.06); border: 2px solid {SUCCESS}; border-radius: 10px; color: {SUCCESS}; padding: 12px;")
 
 
 class TimeInput(QWidget):
@@ -809,7 +631,6 @@ class VideoPreview(QWidget):
 
 
 # ── Main Window ────────────────────────────────────────────────────
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -833,7 +654,7 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # Header (same as original)
+        # Header
         hdr = QWidget()
         hdr.setFixedHeight(72)
         hdr.setStyleSheet(f"background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #0A0F1E, stop:0.6 #0D1628, stop:1 #0A1020); border-bottom: 1px solid {BORDER};")
@@ -881,7 +702,7 @@ class MainWindow(QMainWindow):
         self._src_stack = QStackedWidget()
         sb.addWidget(self._src_stack)
 
-        # Local file
+        # Local file page
         fp = QWidget()
         fl = QVBoxLayout(fp)
         self._drop = DropZone()
@@ -889,7 +710,7 @@ class MainWindow(QMainWindow):
         fl.addWidget(self._drop)
         self._src_stack.addWidget(fp)
 
-        # YouTube
+        # YouTube page
         yp = QWidget()
         yl = QVBoxLayout(yp)
         yt_row = QHBoxLayout()
@@ -903,6 +724,7 @@ class MainWindow(QMainWindow):
         self._yt_preview_btn.clicked.connect(self._load_yt_preview)
         yt_row.addWidget(self._yt_preview_btn)
         yl.addLayout(yt_row)
+
         self._yt_status_lbl = QLabel("")
         self._yt_status_lbl.setWordWrap(True)
         yl.addWidget(self._yt_status_lbl)
@@ -950,7 +772,7 @@ class MainWindow(QMainWindow):
         name_row.addWidget(self._name_edit)
         ob.addLayout(name_row)
 
-        # Action
+        # Action buttons
         act = QHBoxLayout()
         self._run_btn = GlowButton("▶   Slice Video")
         self._run_btn.clicked.connect(self._start)
@@ -1102,7 +924,6 @@ class MainWindow(QMainWindow):
 
 
 # ── Entry point ────────────────────────────────────────────────────
-
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("VideoSlicer")
@@ -1111,8 +932,6 @@ def main():
     pal = QPalette()
     pal.setColor(QPalette.ColorRole.Window, QColor(BG))
     pal.setColor(QPalette.ColorRole.WindowText, QColor(TEXT))
-    pal.setColor(QPalette.ColorRole.Base, QColor(SURFACE))
-    pal.setColor(QPalette.ColorRole.Text, QColor(TEXT))
     app.setPalette(pal)
 
     win = MainWindow()
