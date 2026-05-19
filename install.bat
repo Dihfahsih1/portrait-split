@@ -1,14 +1,13 @@
 @echo off
 :: ═══════════════════════════════════════════════════════════════
-::   DIGITALCHURCH DC — Windows Installer (v4 - stable)
-::   Fixes: window disappearing, silent errors, pth patch
+::   DIGITALCHURCH DC — Windows Installer (v5 - with shortcuts)
+::   Fixes: window disappearing, silent errors, pth patch, desktop shortcuts
 :: ═══════════════════════════════════════════════════════════════
 setlocal EnableDelayedExpansion
 
 title DIGITALCHURCH DC — Installer
 
 :: ── Keep window open on ANY unexpected exit ──────────────────────
-:: This trap ensures errors are always visible
 if "%~1"=="ELEVATED" goto :main
 
 :: ── Self-elevate to Administrator ───────────────────────────────
@@ -28,8 +27,9 @@ cls
 echo.
 echo  +----------------------------------------------------------+
 echo  ^|                                                          ^|
-echo  ^|     DIGITALCHURCH DC  --  Windows Installer             ^|
+echo  ^|     DIGITALCHURCH DC  --  Windows Installer v5          ^|
 echo  ^|     Portrait Split  +  Ultra-Fast VideoSlicer           ^|
+echo  ^|     Desktop & Start Menu Shortcuts Included             ^|
 echo  ^|                                                          ^|
 echo  +----------------------------------------------------------+
 echo.
@@ -42,6 +42,8 @@ set "EMBED_DIR=%INSTALL_DIR%\python-embed"
 set "SCRIPTS_DIR=%EMBED_DIR%\Scripts"
 set "FFMPEG_DIR=%INSTALL_DIR%\ffmpeg"
 set "PYTHON_BIN=%EMBED_DIR%\python.exe"
+set "DESKTOP_DIR=%USERPROFILE%\Desktop"
+set "START_MENU_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\DigitalChurch DC"
 
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 
@@ -55,7 +57,7 @@ if exist "%PYTHON_BIN%" (
     goto :patch_pth
 )
 
-echo  Downloading portable Python 3.11 ...
+echo  Downloading portable Python 3.11.9...
 curl.exe -fsSL "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip" ^
     -o "%TEMP%\pyembed.zip"
 if %errorlevel% neq 0 (
@@ -133,13 +135,11 @@ if exist "%FFMPEG_DIR%\bin\ffmpeg.exe" (
     goto :pip
 )
 
-:: Download just the 3 binaries we need directly (~7MB total vs ~100MB zip)
-:: Source: github.com/BtbN/FFmpeg-Builds (official automated builds)
 set "FFMPEG_BASE=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
 set "FFMPEG_BIN_URL=%FFMPEG_BASE%/ffmpeg-master-latest-win64-gpl.zip"
 
-echo  Downloading FFmpeg (~45MB optimised build)...
-echo  (Much faster than the full release - just the essentials)
+echo  Downloading FFmpeg (~45MB)...
+echo  (Extracting only essential executables)
 if not exist "%FFMPEG_DIR%\bin" mkdir "%FFMPEG_DIR%\bin"
 
 curl.exe -fL --progress-bar "%FFMPEG_BIN_URL%" -o "%TEMP%\ffmpeg.zip"
@@ -156,10 +156,9 @@ if %errorlevel% neq 0 (
     )
 )
 
-echo  Extracting FFmpeg (extracting only ffmpeg.exe, ffprobe.exe, ffplay.exe)...
+echo  Extracting FFmpeg (ffmpeg.exe, ffprobe.exe, ffplay.exe only)...
 if exist "%TEMP%\ffmpeg_temp" rd /s /q "%TEMP%\ffmpeg_temp" >nul 2>&1
 
-:: Extract only the bin folder to save time
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "Add-Type -Assembly 'System.IO.Compression.FileSystem'; $z=[IO.Compression.ZipFile]::OpenRead('%TEMP%\ffmpeg.zip'); foreach($e in $z.Entries){ if($e.Name -match '^(ffmpeg|ffprobe|ffplay)\.exe$'){ [IO.Compression.ZipFileExtensions]::ExtractToFile($e,'%FFMPEG_DIR%\bin\'+$e.Name,$true) } }; $z.Dispose()"
 
@@ -177,7 +176,7 @@ set "PATH=%FFMPEG_DIR%\bin;%PATH%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$cur=[Environment]::GetEnvironmentVariable('Path','User'); if ($cur -notlike '*%FFMPEG_DIR%*') { [Environment]::SetEnvironmentVariable('Path',$cur+';%FFMPEG_DIR%\bin','User') }"
 
-echo  [OK] FFmpeg installed
+echo  [OK] FFmpeg installed and added to PATH
 
 :: ════════════════════════════════════════════════════════════════
 ::  STEP 3 — Bootstrap pip
@@ -204,7 +203,7 @@ if %errorlevel% neq 0 (
 )
 
 echo  Installing pip...
-"%PYTHON_BIN%" "%TEMP%\get-pip.py"
+"%PYTHON_BIN%" "%TEMP%\get-pip.py" --no-warn-script-location
 if %errorlevel% neq 0 (
     echo.
     echo  [ERROR] pip bootstrap failed.
@@ -238,11 +237,11 @@ echo.
 echo  [4/5] Installing required packages...
 
 echo  Upgrading pip...
-"%PYTHON_BIN%" -m pip install --upgrade pip --quiet
+"%PYTHON_BIN%" -m pip install --upgrade pip --quiet --no-warn-script-location
 if %errorlevel% neq 0 echo  [WARN] pip upgrade failed, continuing...
 
-echo  Installing PyQt6...
-"%PYTHON_BIN%" -m pip install PyQt6 PyQt6-Qt6
+echo  Installing PyQt6 (GUI framework)...
+"%PYTHON_BIN%" -m pip install PyQt6 PyQt6-Qt6 --no-warn-script-location
 if %errorlevel% neq 0 (
     echo.
     echo  [ERROR] Failed to install PyQt6.
@@ -250,8 +249,8 @@ if %errorlevel% neq 0 (
     goto :error
 )
 
-echo  Installing yt-dlp...
-"%PYTHON_BIN%" -m pip install yt-dlp
+echo  Installing yt-dlp (video downloader)...
+"%PYTHON_BIN%" -m pip install yt-dlp --no-warn-script-location
 if %errorlevel% neq 0 (
     echo.
     echo  [ERROR] Failed to install yt-dlp.
@@ -259,13 +258,19 @@ if %errorlevel% neq 0 (
     goto :error
 )
 
-echo  Installing opencv-python and numpy...
-"%PYTHON_BIN%" -m pip install opencv-python numpy
+echo  Installing opencv-python and numpy (video processing)...
+"%PYTHON_BIN%" -m pip install opencv-python numpy --no-warn-script-location
 if %errorlevel% neq 0 (
     echo.
     echo  [ERROR] Failed to install opencv-python / numpy.
     echo.
     goto :error
+)
+
+echo  Installing pywin32 (for shortcut creation)...
+"%PYTHON_BIN%" -m pip install pywin32 winshell --no-warn-script-location
+if %errorlevel% neq 0 (
+    echo  [WARN] pywin32 install failed - shortcuts will use PowerShell fallback
 )
 
 echo  [OK] All packages installed
@@ -319,11 +324,43 @@ if exist "%~dp0install.py" (
     del "%TEMP%\dc_install.py" >nul 2>&1
 )
 
+:: ════════════════════════════════════════════════════════════════
+::  CREATE SHORTCUTS - Additional verification
+:: ════════════════════════════════════════════════════════════════
+echo.
+echo  Creating Desktop and Start Menu shortcuts...
+
+:: Create Start Menu folder
+if not exist "%START_MENU_DIR%" mkdir "%START_MENU_DIR%"
+
+:: Function to create shortcut using PowerShell
+call :CreateShortcut "DigitalChurch DC Suite" "digitalchurch_dc.py" "DigitalChurch DC Media Suite - Complete toolkit"
+call :CreateShortcut "Portrait Split GUI" "portrait_split_gui.py" "Quick portrait video splitter with GUI"
+call :CreateShortcut "VideoSlicer Ultra Fast" "video_slicer.py" "Ultra-fast video slicer with frame-accurate cutting"
+
+:: Create uninstall shortcut in Start Menu
+if exist "%INSTALL_DIR%\uninstall.bat" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%START_MENU_DIR%\Uninstall DigitalChurch DC.lnk'); $Shortcut.TargetPath = '%INSTALL_DIR%\uninstall.bat'; $Shortcut.WorkingDirectory = '%INSTALL_DIR%'; $Shortcut.Description = 'Uninstall DigitalChurch DC Media Suite'; $Shortcut.Save()"
+    echo  [OK] Start Menu: Uninstall shortcut created
+)
+
 echo.
 echo  +----------------------------------------------------------+
 echo  ^|                                                          ^|
 echo  ^|     Installation Completed Successfully!                 ^|
-echo  ^|     You can now run VideoSlicer.                         ^|
+echo  ^|                                                          ^|
+echo  ^|     Desktop Shortcuts Created:                           ^|
+echo  ^|       • DigitalChurch DC Suite                           ^|
+echo  ^|       • Portrait Split GUI                               ^|
+echo  ^|       • VideoSlicer Ultra Fast                           ^|
+echo  ^|                                                          ^|
+echo  ^|     Start Menu Folder:                                   ^|
+echo  ^|       DigitalChurch DC (All apps + Uninstaller)          ^|
+echo  ^|                                                          ^|
+echo  ^|     Quick Launch:                                        ^|
+echo  ^|       Double-click any desktop shortcut                  ^|
+echo  ^|       or find in Start Menu                              ^|
 echo  ^|                                                          ^|
 echo  +----------------------------------------------------------+
 echo.
@@ -332,14 +369,60 @@ pause >nul
 exit /b 0
 
 :: ════════════════════════════════════════════════════════════════
+::  SHORTCUT CREATION SUBROUTINE
+:: ════════════════════════════════════════════════════════════════
+:CreateShortcut
+set "SHORTCUT_NAME=%~1"
+set "SCRIPT_NAME=%~2"
+set "DESCRIPTION=%~3"
+
+if not exist "%INSTALL_DIR%\%SCRIPT_NAME%" (
+    echo  [WARN] Script not found: %SCRIPT_NAME% - skipping shortcut
+    goto :eof
+)
+
+:: Create Desktop shortcut
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%DESKTOP_DIR%\%SHORTCUT_NAME%.lnk'); $Shortcut.TargetPath = '%PYTHON_BIN%'; $Shortcut.Arguments = '\"%INSTALL_DIR%\%SCRIPT_NAME%\"'; $Shortcut.WorkingDirectory = '%INSTALL_DIR%'; $Shortcut.Description = '%DESCRIPTION%'; $Shortcut.Save()"
+
+if %errorlevel% equ 0 (
+    echo  [OK] Desktop shortcut created: %SHORTCUT_NAME%
+) else (
+    echo  [WARN] Failed to create Desktop shortcut: %SHORTCUT_NAME%
+)
+
+:: Create Start Menu shortcut
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%START_MENU_DIR%\%SHORTCUT_NAME%.lnk'); $Shortcut.TargetPath = '%PYTHON_BIN%'; $Shortcut.Arguments = '\"%INSTALL_DIR%\%SCRIPT_NAME%\"'; $Shortcut.WorkingDirectory = '%INSTALL_DIR%'; $Shortcut.Description = '%DESCRIPTION%'; $Shortcut.Save()"
+
+if %errorlevel% equ 0 (
+    echo  [OK] Start Menu shortcut created: %SHORTCUT_NAME%
+) else (
+    echo  [WARN] Failed to create Start Menu shortcut: %SHORTCUT_NAME%
+)
+goto :eof
+
+:: ════════════════════════════════════════════════════════════════
 ::  ERROR HANDLER — always shows the error before pausing
 :: ════════════════════════════════════════════════════════════════
 :error
+echo.
 echo  ============================================================
 echo   INSTALLATION FAILED
 echo   Scroll up to find the [ERROR] message above.
 echo   Screenshot this window and share it for support.
 echo  ============================================================
+echo.
+echo  Troubleshooting tips:
+echo   1. Check your internet connection
+echo   2. Disable antivirus temporarily
+echo   3. Run as Administrator
+echo   4. Check GitHub repository is accessible
+echo.
+echo  Manual installation:
+echo   1. Install Python 3.11 from python.org
+echo   2. Install FFmpeg from gyan.dev
+echo   3. Run: pip install PyQt6 opencv-python numpy yt-dlp pywin32
 echo.
 echo  Press any key to close...
 pause >nul
