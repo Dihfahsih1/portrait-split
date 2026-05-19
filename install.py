@@ -306,7 +306,7 @@ def setup_venv():
     ok(f"venv created {'(system-site-packages for PyQt6)' if use_system_site else ''}")
 
     info("Upgrading pip…")
-    run([str(VENV_PIP), "install", "--upgrade", "pip", "-q"])
+    run([str(VENV_PYTHON), "-m", "pip", "install", "--upgrade", "pip", "-q"])
 
     # Core packages for Portrait Split
     info("Installing opencv-python, numpy…")
