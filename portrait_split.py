@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-portrait_split.py — core engine
+portrait_split.py — core engine (Windows-compatible)
 Called directly or imported by the GUI.
 """
 
 import argparse
 import multiprocessing as mp
 import os
+import shutil  # ← MOVED TO TOP - must be before _find_ffmpeg()
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import cv2
@@ -22,6 +24,34 @@ WRITE_BATCH   = 16
 MAX_JUMP_PX   = 400
 MAX_DRIFT_PX  = 6
 PRE_SEEK_S    = 5.0
+
+# ── Find FFmpeg on Windows ────────────────────────────────────────
+def _find_ffmpeg():
+    """Locate ffmpeg executable, checking common Windows locations"""
+    # Check if ffmpeg is in PATH
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        return ffmpeg_path
+    
+    # Check common installation locations
+    if sys.platform == "win32":
+        common_paths = [
+            Path(os.environ.get("LOCALAPPDATA", "")) / "DigitalChurch" / "ffmpeg" / "bin" / "ffmpeg.exe",
+            Path(os.environ.get("PROGRAMFILES", "C:\\Program Files")) / "ffmpeg" / "bin" / "ffmpeg.exe",
+            Path(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)")) / "ffmpeg" / "bin" / "ffmpeg.exe",
+            Path.home() / "ffmpeg" / "bin" / "ffmpeg.exe",
+            Path("C:\\ffmpeg\\bin\\ffmpeg.exe"),
+        ]
+        
+        for path in common_paths:
+            if path.exists():
+                return str(path)
+    
+    # Default fallback
+    return "ffmpeg"
+
+# Global FFmpeg path
+FFMPEG = _find_ffmpeg()
 
 
 def _ema(cur, tgt, a):
@@ -54,7 +84,7 @@ def _two_step_seek(start_sec):
 
 def _open_encoder(path, fps, crf, preset):
     return subprocess.Popen(
-        ["ffmpeg", "-y",
+        [FFMPEG, "-y",
          "-f", "rawvideo", "-vcodec", "rawvideo",
          "-s", f"{OUT_W}x{OUT_H}", "-pix_fmt", "bgr24",
          "-r", str(fps), "-i", "pipe:0",
@@ -70,7 +100,7 @@ def _open_encoder(path, fps, crf, preset):
 def _extract_audio(src, start_sec, dur_sec, dst):
     fast, pre = _two_step_seek(start_sec)
     subprocess.run(
-        ["ffmpeg", "-y",
+        [FFMPEG, "-y",
          "-ss", f"{fast:.6f}", "-i", src,
          "-ss", f"{pre:.6f}",
          "-t",  f"{dur_sec:.6f}",
@@ -81,7 +111,7 @@ def _extract_audio(src, start_sec, dur_sec, dst):
 
 def _mux(vid, aud, out):
     r = subprocess.run(
-        ["ffmpeg", "-y", "-i", vid, "-i", aud,
+        [FFMPEG, "-y", "-i", vid, "-i", aud,
          "-map", "0:v", "-map", "1:a", "-c", "copy", out],
         capture_output=True,
     )
@@ -106,7 +136,7 @@ def _process_segment(task):
     det_scale = task["detect_scale"]
     max_jump  = task["max_jump"]
     max_drift = task["max_drift"]
-    log_q     = task.get("log_q")         # optional multiprocessing.Queue
+    log_q     = task.get("log_q")
 
     def log(msg):
         print(msg, flush=True)
@@ -119,22 +149,28 @@ def _process_segment(task):
     raw_bytes = src_w * src_h * 3
     batch_sz  = OUT_W * OUT_H * 3 * WRITE_BATCH
 
-    _casc = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    cascade = cv2.CascadeClassifier(_casc)
+    # Load cascade classifier - handle Windows path
+    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    if not os.path.exists(cascade_path):
+        cascade_path = str(Path(cv2.__file__).parent / "data" / "haarcascade_frontalface_default.xml")
+    cascade = cv2.CascadeClassifier(cascade_path)
 
-    tmp_vid = tempfile.NamedTemporaryFile(suffix=f"_p{part}_vid.mp4", delete=False)
-    tmp_aud = tempfile.NamedTemporaryFile(suffix=f"_p{part}_aud.aac", delete=False)
+    # Use temp directory that works on Windows
+    tmp_dir = tempfile.gettempdir()
+    tmp_vid = tempfile.NamedTemporaryFile(suffix=f"_p{part}_vid.mp4", delete=False, dir=tmp_dir)
+    tmp_aud = tempfile.NamedTemporaryFile(suffix=f"_p{part}_aud.aac", delete=False, dir=tmp_dir)
     tmp_vid.close(); tmp_aud.close()
 
     fast_seek, pre_seek = _two_step_seek(start_sec)
 
     decoder = subprocess.Popen(
-        ["ffmpeg",
+        [FFMPEG,
          "-ss", f"{fast_seek:.6f}", "-i", src,
          "-ss", f"{pre_seek:.6f}",
          "-t",  f"{dur_sec:.6f}",
          "-f",  "rawvideo", "-pix_fmt", "bgr24", "pipe:1"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        bufsize=10**8,
     )
     encoder = _open_encoder(tmp_vid.name, fps, crf, preset)
 
@@ -176,7 +212,11 @@ def _process_segment(task):
         portrait = _make_portrait(frame, src_w, src_h, cx)
         write_buf.extend(portrait.tobytes())
         if len(write_buf) >= batch_sz:
-            encoder.stdin.write(bytes(write_buf))
+            try:
+                encoder.stdin.write(bytes(write_buf))
+            except BrokenPipeError:
+                log(f"  [warn] {tag} encoder pipe broken")
+                break
             write_buf.clear()
 
         idx += 1
@@ -185,10 +225,15 @@ def _process_segment(task):
             log(f"  {tag}  [{pct:5.1f}%]  frame {idx}/{total_f}")
 
     if write_buf:
-        encoder.stdin.write(bytes(write_buf))
+        try:
+            encoder.stdin.write(bytes(write_buf))
+        except BrokenPipeError:
+            pass
 
-    decoder.stdout.close(); decoder.wait()
-    encoder.stdin.close();  encoder.wait()
+    decoder.stdout.close()
+    decoder.wait()
+    encoder.stdin.close()
+    encoder.wait()
 
     log(f"  {tag}  extracting audio …")
     _extract_audio(src, start_sec, dur_sec, tmp_aud.name)
@@ -196,8 +241,12 @@ def _process_segment(task):
     _mux(tmp_vid.name, tmp_aud.name, final_out)
 
     for f in (tmp_vid.name, tmp_aud.name):
-        try: os.remove(f)
-        except OSError: pass
+        for _ in range(3):
+            try:
+                os.remove(f)
+                break
+            except (OSError, PermissionError):
+                time.sleep(0.1)
 
     log(f"  ✅ {tag}  →  {Path(final_out).name}")
     return part
@@ -212,12 +261,19 @@ def build_tasks(src, out_dir, base_name, seg_sec,
     out_path = Path(out_dir).expanduser().resolve()
     out_path.mkdir(parents=True, exist_ok=True)
 
-    cap   = cv2.VideoCapture(str(src_path))
+    cap = cv2.VideoCapture(str(src_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {src_path}")
+    
     fps   = cap.get(cv2.CAP_PROP_FPS) or 30.0
     src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    dur_s = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) / fps
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    dur_s = total_frames / fps if fps > 0 else 0
     cap.release()
+
+    if dur_s == 0:
+        raise RuntimeError(f"Could not determine video duration: {src_path}")
 
     tasks, part, t = [], 1, 0.0
     while t < dur_s:
@@ -274,8 +330,13 @@ def run(src, out_dir, base_name, seg_sec, smooth, crf, preset,
     log(f"  Output   : {OUT_W}×{OUT_H} portrait  CRF {crf}  {preset}")
     log(f"  Segments : {seg_sec}s each  →  {n_parts} parts")
     log(f"  Parallel : {parallel}")
+    log(f"  FFmpeg   : {FFMPEG}")
     log(f"{'━'*65}\n")
 
+    if sys.platform == "win32" and parallel > 1:
+        parallel = min(parallel, max(1, os.cpu_count() or 2))
+        log(f"  Windows: adjusted parallel to {parallel}")
+    
     completed = 0
     with mp.Pool(processes=parallel) as pool:
         for _ in pool.imap_unordered(_process_segment, tasks):
@@ -285,7 +346,6 @@ def run(src, out_dir, base_name, seg_sec, smooth, crf, preset,
     log(f"\n🎉  Done!  {n_parts} portrait parts saved to:\n    {out_dir}")
 
 
-# ── CLI ───────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(description="Portrait split + face tracking")
     ap.add_argument("-i", "--input",      required=True)
@@ -315,5 +375,6 @@ def main():
 
 
 if __name__ == "__main__":
+    mp.freeze_support()  # Required for Windows executables
     mp.set_start_method("spawn", force=True)
     main()

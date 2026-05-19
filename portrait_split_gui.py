@@ -1,4 +1,59 @@
 #!/usr/bin/env python3
+
+"""
+portrait_split_gui.py — Portrait Split v2  (Premium UI)
+"""
+
+# ── Windows Crash Prevention ──────────────────────────────────────
+import sys
+import os
+import traceback
+import time
+from pathlib import Path
+
+# Redirect crashes to log file
+CRASH_LOG = Path(__file__).parent / "portrait_split_crash.log"
+
+def log_error(error_msg):
+    with open(CRASH_LOG, 'a', encoding='utf-8') as f:
+        f.write(f"\n{'='*60}\n{time.ctime()}\n{error_msg}\n{'='*60}\n")
+
+def global_exception_handler(exc_type, exc_value, exc_tb):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    error = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    log_error(error)
+    print(f"FATAL ERROR:\n{error}", file=sys.stderr)
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("Portrait Split Error", 
+                           f"Application crashed:\n\n{str(exc_value)}\n\n"
+                           f"Details in: {CRASH_LOG}")
+        root.destroy()
+    except:
+        pass
+
+sys.excepthook = global_exception_handler
+
+# Check core engine exists
+CORE_SCRIPT = Path(__file__).parent / "portrait_split.py"
+if not CORE_SCRIPT.exists():
+    log_error(f"Core engine missing: {CORE_SCRIPT}")
+    print(f"ERROR: Cannot find {CORE_SCRIPT}")
+    sys.exit(1)
+
+# ── Now proceed with normal imports ───────────────────────────────
+import multiprocessing as mp
+import subprocess
+import threading
+import queue
+import math
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 """
 portrait_split_gui.py — Portrait Split v2  (Premium UI)
 """
