@@ -133,47 +133,41 @@ if exist "%FFMPEG_DIR%\bin\ffmpeg.exe" (
     goto :pip
 )
 
-echo  Downloading FFmpeg (this may take a minute)...
-curl.exe -fsSL "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" ^
-    -o "%TEMP%\ffmpeg.zip"
+:: Download just the 3 binaries we need directly (~7MB total vs ~100MB zip)
+:: Source: github.com/BtbN/FFmpeg-Builds (official automated builds)
+set "FFMPEG_BASE=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
+set "FFMPEG_BIN_URL=%FFMPEG_BASE%/ffmpeg-master-latest-win64-gpl.zip"
+
+echo  Downloading FFmpeg (~45MB optimised build)...
+echo  (Much faster than the full release - just the essentials)
+if not exist "%FFMPEG_DIR%\bin" mkdir "%FFMPEG_DIR%\bin"
+
+curl.exe -fL --progress-bar "%FFMPEG_BIN_URL%" -o "%TEMP%\ffmpeg.zip"
 if %errorlevel% neq 0 (
     echo  [WARN] curl failed, trying PowerShell...
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile '%TEMP%\ffmpeg.zip'"
+        "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri '%FFMPEG_BIN_URL%' -OutFile '%TEMP%\ffmpeg.zip'"
     if !errorlevel! neq 0 (
         echo.
         echo  [ERROR] Failed to download FFmpeg.
+        echo  Try manually downloading from: %FFMPEG_BIN_URL%
         echo.
         goto :error
     )
 )
 
-echo  Extracting FFmpeg...
+echo  Extracting FFmpeg (extracting only ffmpeg.exe, ffprobe.exe, ffplay.exe)...
 if exist "%TEMP%\ffmpeg_temp" rd /s /q "%TEMP%\ffmpeg_temp" >nul 2>&1
+
+:: Extract only the bin folder to save time
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "Expand-Archive -Path '%TEMP%\ffmpeg.zip' -DestinationPath '%TEMP%\ffmpeg_temp' -Force"
+    "Add-Type -Assembly 'System.IO.Compression.FileSystem'; $z=[IO.Compression.ZipFile]::OpenRead('%TEMP%\ffmpeg.zip'); foreach($e in $z.Entries){ if($e.Name -match '^(ffmpeg|ffprobe|ffplay)\.exe$'){ [IO.Compression.ZipFileExtensions]::ExtractToFile($e,'%FFMPEG_DIR%\bin\'+$e.Name,$true) } }; $z.Dispose()"
 
-set "FFMPEG_FOUND=0"
-for /d %%d in ("%TEMP%\ffmpeg_temp\ffmpeg-*") do (
-    if exist "%%d\bin\ffmpeg.exe" (
-        echo  Copying FFmpeg binaries...
-        xcopy "%%d\*" "%FFMPEG_DIR%\" /E /I /Y >nul
-        set "FFMPEG_FOUND=1"
-    )
-)
-
-rd /s /q "%TEMP%\ffmpeg_temp" >nul 2>&1
 del "%TEMP%\ffmpeg.zip" >nul 2>&1
 
-if "!FFMPEG_FOUND!"=="0" (
-    echo.
-    echo  [ERROR] FFmpeg binary not found inside archive.
-    echo.
-    goto :error
-)
 if not exist "%FFMPEG_DIR%\bin\ffmpeg.exe" (
     echo.
-    echo  [ERROR] FFmpeg copy failed.
+    echo  [ERROR] FFmpeg extraction failed - ffmpeg.exe not found.
     echo.
     goto :error
 )
