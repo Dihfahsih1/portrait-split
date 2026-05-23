@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 """
 portrait_split_gui.py — Portrait Split v2  (Premium UI)
 """
@@ -11,12 +10,45 @@ import traceback
 import time
 from pathlib import Path
 
-# Redirect crashes to log file
+# ── Windows DPI awareness — must come before any Tk window ───────
+# Without this, Tk apps on high-DPI Windows displays can appear
+# blurry, tiny, or positioned off-screen (i.e. invisible to user).
+if sys.platform == "win32":
+    try:
+        import ctypes
+        # Per-monitor DPI awareness (best mode on Win 8.1+)
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            # Fallback: system DPI awareness (Win Vista+)
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+# ── Redirect crashes to log file ──────────────────────────────────
 CRASH_LOG = Path(__file__).parent / "portrait_split_crash.log"
 
+
 def log_error(error_msg):
-    with open(CRASH_LOG, 'a', encoding='utf-8') as f:
-        f.write(f"\n{'='*60}\n{time.ctime()}\n{error_msg}\n{'='*60}\n")
+    try:
+        with open(CRASH_LOG, 'a', encoding='utf-8') as f:
+            f.write(f"\n{'='*60}\n{time.ctime()}\n{error_msg}\n{'='*60}\n")
+    except Exception:
+        pass
+
+
+def _show_error_native(title, msg):
+    """Show an error box even if Tkinter is unavailable (Windows only)."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, msg, title, 0x10)
+            return
+        except Exception:
+            pass
+    # Last resort: print to stderr (visible if launched from a terminal)
+    print(f"\n[{title}]\n{msg}", file=sys.stderr)
+
 
 def global_exception_handler(exc_type, exc_value, exc_tb):
     if issubclass(exc_type, KeyboardInterrupt):
@@ -24,50 +56,67 @@ def global_exception_handler(exc_type, exc_value, exc_tb):
         return
     error = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
     log_error(error)
-    print(f"FATAL ERROR:\n{error}", file=sys.stderr)
+    detail = (
+        f"Application crashed:\n\n{str(exc_value)}\n\n"
+        f"Full details written to:\n{CRASH_LOG}"
+    )
+    # Try Tkinter messagebox first
     try:
         import tkinter as tk
         from tkinter import messagebox
         root = tk.Tk()
         root.withdraw()
-        messagebox.showerror("Portrait Split Error", 
-                           f"Application crashed:\n\n{str(exc_value)}\n\n"
-                           f"Details in: {CRASH_LOG}")
+        messagebox.showerror("Portrait Split Error", detail)
         root.destroy()
-    except:
-        pass
+    except Exception:
+        # Fall back to a Win32 MessageBox so the error is never silent
+        _show_error_native("Portrait Split Error", detail)
+
 
 sys.excepthook = global_exception_handler
 
-# Check core engine exists
-CORE_SCRIPT = Path(__file__).parent / "portrait_split.py"
-if not CORE_SCRIPT.exists():
-    log_error(f"Core engine missing: {CORE_SCRIPT}")
-    print(f"ERROR: Cannot find {CORE_SCRIPT}")
+# ── Guard: Tkinter must be available ─────────────────────────────
+# Tkinter ships with the official Python installer but can be missing
+# if Python was installed without the "tcl/tk and IDLE" option, or via
+# some minimal distributions. We check early so we can show a useful
+# error instead of a silent crash.
+try:
+    import tkinter as _tk_test
+    del _tk_test
+except ImportError:
+    msg = (
+        "Tkinter (Tcl/Tk) is not available in your Python installation.\n\n"
+        "Fix on Windows:\n"
+        "  1. Open 'Add or Remove Programs'\n"
+        "  2. Find Python, click 'Modify'\n"
+        "  3. Enable the 'tcl/tk and IDLE' optional feature\n\n"
+        "Or reinstall Python from https://python.org and tick\n"
+        "'tcl/tk and IDLE' during installation."
+    )
+    log_error(f"ImportError: tkinter not available\n{msg}")
+    _show_error_native("Portrait Split — Missing Tkinter", msg)
     sys.exit(1)
 
-# ── Now proceed with normal imports ───────────────────────────────
-import multiprocessing as mp
-import subprocess
-import threading
-import queue
-import math
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
-"""
-portrait_split_gui.py — Portrait Split v2  (Premium UI)
-"""
+# ── Core engine must exist ────────────────────────────────────────
+CORE_SCRIPT = Path(__file__).parent / "portrait_split.py"
+if not CORE_SCRIPT.exists():
+    msg = (
+        f"Core engine not found:\n{CORE_SCRIPT}\n\n"
+        "Make sure portrait_split.py is in the same folder as this file."
+    )
+    log_error(msg)
+    _show_error_native("Portrait Split — Missing Engine", msg)
+    sys.exit(1)
 
+# ── Normal imports ────────────────────────────────────────────────
 import multiprocessing as mp
 import subprocess
-import sys
 import threading
 import queue
 import math
-import time
-from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+
 
 # ── Palette ───────────────────────────────────────────────────────
 C = {
@@ -119,7 +168,7 @@ class GlowButton(tk.Canvas):
         self._color   = color
         self._bw      = width
         self._bh      = height
-        self._alpha   = 0.0        # hover animation state
+        self._alpha   = 0.0
         self._anim_id = None
         self._enabled = True
 
@@ -130,7 +179,6 @@ class GlowButton(tk.Canvas):
         self._paint()
 
     def _hex_blend(self, c1, c2, t):
-        """Blend two hex colors by factor t (0→c1, 1→c2)."""
         def h(c): return tuple(int(c[i:i+2], 16) for i in (1, 3, 5))
         r1, g1, b1 = h(c1);  r2, g2, b2 = h(c2)
         r = int(r1 + (r2-r1)*t)
@@ -143,7 +191,6 @@ class GlowButton(tk.Canvas):
         w, h, r = self._bw, self._bh, self._bh // 2
         t = self._alpha
 
-        # Outer glow
         if t > 0:
             for i in range(8, 0, -1):
                 expand = i * 2 * t
@@ -152,17 +199,14 @@ class GlowButton(tk.Canvas):
                 self._pill(expand, expand, w-expand, h-expand,
                            r + expand//2, glow_c)
 
-        # Button body gradient (simulate with two rects)
         body_c = self._hex_blend(self._color,
                                  self._hex_blend(self._color, "#FFFFFF", 0.15),
                                  t * 0.3)
         self._pill(0, 0, w, h, r, body_c)
 
-        # Shine strip at top
         shine_c = self._hex_blend(body_c, "#FFFFFF", 0.18 + t*0.1)
         self._pill(2, 2, w-2, h//2, r-2, shine_c)
 
-        # Label
         lc = C["text"] if self._enabled else C["text3"]
         self.create_text(w//2, h//2, text=self._text,
                          fill=lc, font=FONTS["subtitle"])
@@ -235,7 +279,6 @@ class GhostButton(tk.Canvas):
         w, h, r = self._bw, self._bh, self._bh // 2
         bc = C["border2"] if self._hover else C["border"]
         tc = C["text2"]   if self._hover else C["text3"]
-        # outline pill
         self.create_polygon(
             r, 0,   w-r, 0,
             w, 0,   w, r,
@@ -359,7 +402,7 @@ class SectionCard(tk.Frame):
 class SettingRow(tk.Frame):
     """Label + spinbox row."""
 
-    def __init__(self, parent, label, var, from_, to, tip="", **kw):
+    def __init__(self, parent, label, var, from_, to, tip="", color=None, **kw):
         super().__init__(parent, bg=C["surface"])
         tk.Label(self, text=label, font=FONTS["body"],
                  bg=C["surface"], fg=C["text2"]).pack(side="left")
@@ -526,17 +569,13 @@ class App(tk.Tk):
     # ── Layout ───────────────────────────────────────────────────
 
     def _build(self):
-        # ── Left panel ───────────────────────────────────────────
         left = tk.Frame(self, bg=C["surface"], width=270)
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
-
         self._build_sidebar(left)
 
-        # ── Right panel ──────────────────────────────────────────
         right = tk.Frame(self, bg=C["bg"])
         right.pack(side="right", fill="both", expand=True)
-
         self._build_topbar(right)
         self._build_content(right)
 
@@ -561,11 +600,9 @@ class App(tk.Tk):
                  font=FONTS["small"],
                  bg=C["surface"], fg=C["text3"]).pack(side="left")
 
-        # Divider
         tk.Frame(parent, bg=C["border"], height=1).pack(
             fill="x", padx=20, pady=22)
 
-        # File zones
         self._label(parent, "INPUT VIDEO", icon="▶")
         self.v_input = tk.StringVar()
         DropZone(parent, self.v_input,
@@ -601,7 +638,6 @@ class App(tk.Tk):
         tk.Frame(parent, bg=C["border"], height=1).pack(
             fill="x", padx=20, pady=18)
 
-        # Buttons
         self.btn_start = GlowButton(
             parent, "▶   Start Processing",
             command=self._start,
@@ -614,141 +650,105 @@ class App(tk.Tk):
             color=C["pink"], width=238, height=38)
         self.btn_stop.pack(padx=16)
 
-        # Status row
         status_row = tk.Frame(parent, bg=C["surface"])
         status_row.pack(anchor="w", padx=18, pady=16)
 
         self._dot = PulsingDot(status_row)
-        self._dot.pack(side="left")
+        self._dot.pack(side="left", padx=(0,8))
 
         self._status_lbl = tk.Label(
             status_row, text="Ready",
-            font=FONTS["body"],
-            bg=C["surface"], fg=C["text3"])
-        self._status_lbl.pack(side="left", padx=(6,0))
+            font=FONTS["small"],
+            bg=C["surface"], fg=C["text2"])
+        self._status_lbl.pack(side="left")
 
     def _build_topbar(self, parent):
-        bar = tk.Frame(parent, bg=C["bg2"], height=52)
+        bar = tk.Frame(parent, bg=C["bg2"], height=44)
         bar.pack(fill="x")
         bar.pack_propagate(False)
 
         self._tabs = {}
-        self._active_tab = "settings"
-        tabs = [("settings", "⚙  Settings"), ("log", "📋  Live Log")]
-        for i, (key, label) in enumerate(tabs):
+        for key, label in [("settings", "⚙  Settings"), ("log", "📋  Log")]:
             btn = tk.Button(
                 bar, text=label,
-                font=FONTS["subtitle"],
-                bg=C["purple"] if i==0 else C["surface2"],
-                fg=C["text"],
-                activebackground=C["purple2"],
-                activeforeground=C["text"],
-                relief="flat", bd=0,
-                padx=20, pady=14,
-                cursor="hand2",
+                font=FONTS["small"],
+                bg=C["surface2"], fg=C["text2"],
+                activebackground=C["purple"], activeforeground=C["text"],
+                relief="flat", bd=0, padx=16,
                 command=lambda k=key: self._switch(k))
-            btn.pack(side="left")
+            btn.pack(side="left", fill="y")
             self._tabs[key] = btn
 
-        # right side tag
-        tk.Label(bar, text="1080 × 1920  •  9:16  •  H.264",
-                 font=FONTS["small"],
-                 bg=C["bg2"], fg=C["text3"]).pack(
-                     side="right", padx=20)
+        self._active_tab = "settings"
+        self._tabs["settings"].configure(bg=C["purple"])
 
     def _build_content(self, parent):
-        self._content = tk.Frame(parent, bg=C["bg"])
-        self._content.pack(fill="both", expand=True,
-                           padx=18, pady=14)
+        container = tk.Frame(parent, bg=C["bg"])
+        container.pack(fill="both", expand=True, padx=16, pady=16)
 
-        self._settings_frame = self._build_settings(self._content)
-        self._log_frame      = self._build_log(self._content)
+        self._settings_frame = self._build_settings(container)
+        self._log_frame      = self._build_log(container)
+
         self._settings_frame.pack(fill="both", expand=True)
 
     def _build_settings(self, parent):
         outer = tk.Frame(parent, bg=C["bg"])
 
-        # ── Row 1 ────────────────────────────────────────────────
+        # ── Row 1: Encoding cards ────────────────────────────────
         row1 = tk.Frame(outer, bg=C["bg"])
-        row1.pack(fill="both", expand=True, pady=(0,10))
+        row1.pack(fill="x", pady=(0, 12))
         row1.columnconfigure(0, weight=1)
         row1.columnconfigure(1, weight=1)
 
-        # Card: Splitting
-        c1 = SectionCard(row1, "Splitting", "✂", accent=C["purple"])
-        c1.grid(row=0, column=0, sticky="nsew", padx=(0,8))
+        # Card: Segments
+        c1 = SectionCard(row1, "Segments", "✂", accent=C["purple"])
+        c1.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
         self.v_segment  = tk.IntVar(value=200)
         self.v_parallel = tk.IntVar(value=4)
-
-        SettingRow(c1.body, "Segment length (seconds)",
-                   self.v_segment, 30, 3600,
-                   tip="200 = 3 min 20 s").pack(fill="x", pady=5)
+        SettingRow(c1.body, "Segment length (s)",
+                   self.v_segment, 30, 3600).pack(fill="x", pady=4)
         SettingRow(c1.body, "Parallel segments",
-                   self.v_parallel, 1, 16,
-                   tip="More = faster").pack(fill="x", pady=5)
+                   self.v_parallel, 1, 16).pack(fill="x", pady=4)
 
-        tk.Label(c1.body,
-                 text="⚡  More parallel segments process faster\n"
-                      "    but use proportionally more CPU & RAM.",
-                 font=FONTS["small"], justify="left",
-                 bg=C["surface"], fg=C["text3"]).pack(
-                     anchor="w", pady=(6,0))
+        # Card: Encoding
+        c2 = SectionCard(row1, "Encoding", "🎬", accent=C["cyan"])
+        c2.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
-        # Card: Quality
-        c2 = SectionCard(row1, "Quality & Encoding", "🎞", accent=C["cyan"])
-        c2.grid(row=0, column=1, sticky="nsew", padx=(8,0))
-
-        self.v_crf = tk.IntVar(value=18)
-        SettingRow(c2.body, "CRF  (0 = lossless · 51 = worst)",
-                   self.v_crf, 0, 51).pack(fill="x", pady=5)
-
-        tk.Label(c2.body, text="PRESET", font=FONTS["small"],
-                 bg=C["surface"], fg=C["text3"]).pack(anchor="w", pady=(8,2))
-
+        self.v_crf    = tk.IntVar(value=18)
         self.v_preset = tk.StringVar(value="fast")
-        preset_frame = tk.Frame(c2.body, bg=C["surface3"],
-                                highlightthickness=1,
-                                highlightbackground=C["border"])
-        preset_frame.pack(anchor="w")
 
-        style = ttk.Style()
-        style.configure("PS.TCombobox",
-                        fieldbackground=C["surface3"],
-                        background=C["surface3"],
-                        foreground=C["text"],
-                        selectbackground=C["purple"],
-                        arrowcolor=C["purple"])
-        style.map("PS.TCombobox",
-                  fieldbackground=[("readonly", C["surface3"])])
+        SettingRow(c2.body, "CRF quality (0–51)",
+                   self.v_crf, 0, 51).pack(fill="x", pady=4)
 
-        combo = ttk.Combobox(preset_frame,
-                             textvariable=self.v_preset,
-                             values=["ultrafast","superfast","veryfast",
-                                     "faster","fast","medium","slow"],
-                             state="readonly", width=13,
-                             style="PS.TCombobox")
-        combo.pack(padx=2, pady=2)
+        tk.Label(c2.body, text="Encoding preset",
+                 font=FONTS["body"],
+                 bg=C["surface"], fg=C["text2"]).pack(anchor="w")
+        presets = ["ultrafast","superfast","veryfast",
+                   "faster","fast","medium","slow","slower"]
+        pm = tk.Frame(c2.body, bg=C["surface"])
+        pm.pack(fill="x", pady=(2, 0))
+        for p in presets:
+            tk.Radiobutton(
+                pm, text=p, variable=self.v_preset, value=p,
+                font=FONTS["small"],
+                bg=C["surface"], fg=C["text3"],
+                selectcolor=C["purple"],
+                activebackground=C["surface"],
+                relief="flat").pack(side="left")
 
-        tk.Label(c2.body,
-                 text="ultrafast → quickest encode\n"
-                      "slow      → smallest file size",
-                 font=FONTS["small"], justify="left",
-                 bg=C["surface"], fg=C["text3"]).pack(
-                     anchor="w", pady=(6,0))
-
-        # ── Row 2 ────────────────────────────────────────────────
+        # ── Row 2: Tracking + Stats ──────────────────────────────
         row2 = tk.Frame(outer, bg=C["bg"])
         row2.pack(fill="both", expand=True)
         row2.columnconfigure(0, weight=1)
         row2.columnconfigure(1, weight=1)
 
-        # Card: Camera
-        c3 = SectionCard(row2, "Camera Tracking", "🎯", accent=C["pink"])
-        c3.grid(row=0, column=0, sticky="nsew", padx=(0,8))
+        # Card: Tracking
+        c3 = SectionCard(row2, "Face Tracking", "🎯", accent=C["pink"])
+        c3.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
-        self.v_smooth    = tk.DoubleVar(value=0.3)
-        self.v_max_jump  = tk.IntVar(value=400)
+        self.v_smooth   = tk.DoubleVar(value=0.3)
+        self.v_max_jump = tk.IntVar(value=400)
         self.v_max_drift = tk.IntVar(value=6)
 
         SmartSlider(c3.body, "Tracking speed",
@@ -789,7 +789,6 @@ class App(tk.Tk):
         self._sc_eta = StatCard(stat_grid, "ETA", "⏱", C["cyan"])
         self._sc_eta.grid(row=0, column=2, padx=(4,0), sticky="nsew")
 
-        # Progress bar
         pb_outer = tk.Frame(c4.body, bg=C["surface3"],
                             highlightthickness=1,
                             highlightbackground=C["border"])
@@ -810,7 +809,6 @@ class App(tk.Tk):
     def _build_log(self, parent):
         frame = tk.Frame(parent, bg=C["bg"])
 
-        # Header
         hdr = tk.Frame(frame, bg=C["bg"])
         hdr.pack(fill="x", pady=(0,8))
         tk.Label(hdr, text="📋  Live Output",
@@ -899,22 +897,45 @@ class App(tk.Tk):
     def _worker(self, src, out, name, seg, smooth,
                 crf, preset, par, jump, drift):
         script = Path(__file__).parent / "portrait_split.py"
+
+        # On Windows, always use python.exe (not pythonw.exe) for the
+        # worker subprocess so its stdout can be piped reliably.
+        # pythonw.exe has no console and may buffer stdout aggressively,
+        # causing the live-log reader here to stall indefinitely.
+        if sys.platform == "win32":
+            python_exe = Path(sys.executable)
+            # If we were launched via pythonw.exe, swap to python.exe
+            if python_exe.stem.lower() == "pythonw":
+                alt = python_exe.parent / "python.exe"
+                python_exe = alt if alt.exists() else python_exe
+            python_exe = str(python_exe)
+        else:
+            python_exe = sys.executable
+
         cmd = [
-            sys.executable, str(script),
+            python_exe, str(script),
             "-i", src, "-o", out, "-n", name,
             "-s", str(seg),
-            "--smooth",   str(round(smooth, 3)),
-            "--crf",      str(crf),
-            "--preset",   preset,
-            "--parallel", str(par),
-            "--max-jump", str(jump),
-            "--max-drift",str(drift),
+            "--smooth",    str(round(smooth, 3)),
+            "--crf",       str(crf),
+            "--preset",    preset,
+            "--parallel",  str(par),
+            "--max-jump",  str(jump),
+            "--max-drift", str(drift),
         ]
         try:
-            self._proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE,
+            # On Windows: CREATE_NO_WINDOW prevents a console flash,
+            # but still allows stdout piping.
+            kwargs = dict(
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True, bufsize=1)
+                text=True,
+                bufsize=1,
+            )
+            if sys.platform == "win32":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+            self._proc = subprocess.Popen(cmd, **kwargs)
             for line in self._proc.stdout:
                 if not self._running:
                     self._proc.terminate(); break
@@ -925,7 +946,6 @@ class App(tk.Tk):
                        else "dim"  if line.strip().startswith("─")
                        else None)
                 self._log_q.put(("log", line, tag))
-                # parse stats
                 if "complete" in line.lower():
                     self._log_q.put(("parts", None, None))
                 if "fps" in line and "frame" in line:
@@ -980,7 +1000,15 @@ class App(tk.Tk):
 
 
 def main():
+    # freeze_support() must be the very first call in __main__ on Windows
+    # to prevent recursive spawning when multiprocessing creates child processes.
+    mp.freeze_support()
+
+    # 'spawn' is already the default on Windows, but being explicit ensures
+    # the same behaviour if someone runs this on Linux/macOS.
+    # force=True lets us call this even if it was already set somewhere else.
     mp.set_start_method("spawn", force=True)
+
     app = App()
     app.mainloop()
 

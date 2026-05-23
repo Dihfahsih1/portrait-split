@@ -94,36 +94,70 @@ class LaunchThread(QThread):
             )
             return
         try:
-            # On Windows use pythonw.exe — no console window ever appears.
-            # On Linux/mac sys.executable is fine (it's a GUI process anyway).
+            # On Windows: prefer python.exe (not pythonw.exe) so that the
+            # child process can pipe stdout if it needs to (portrait GUI uses
+            # its own Tk window so no console appears anyway).
+            # pythonw.exe would suppress ALL output including startup errors,
+            # making crashes completely invisible.
             if sys.platform == "win32":
-                pythonw = Path(sys.executable).parent / "pythonw.exe"
-                interpreter = str(pythonw) if pythonw.exists() else sys.executable
+                python_exe = Path(sys.executable)
+                # If the hub itself runs under pythonw.exe, use python.exe instead
+                if python_exe.stem.lower() == "pythonw":
+                    alt = python_exe.parent / "python.exe"
+                    python_exe = alt if alt.exists() else python_exe
+                interpreter = str(python_exe)
             else:
                 interpreter = sys.executable
 
-            # Fully detach the child so it lives independently:
-            #   stdin/stdout/stderr -> DEVNULL (no console I/O inherited)
-            #   Windows: DETACHED_PROCESS + CREATE_NO_WINDOW
-            #   Linux/mac: start_new_session=True (new process group,
-            #              survives terminal close)
+            # Capture stderr for a brief window so we can detect immediate crashes.
+            # We use PIPE instead of DEVNULL for stderr, read it after a short wait,
+            # then detach. This gives us crash info without blocking the UI.
             kwargs: dict = dict(
                 cwd=str(HERE),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,   # captured briefly, see below
             )
             if sys.platform == "win32":
                 kwargs["creationflags"] = (
-                    subprocess.DETACHED_PROCESS
-                    | subprocess.CREATE_NEW_PROCESS_GROUP
+                    subprocess.CREATE_NEW_PROCESS_GROUP
                     | subprocess.CREATE_NO_WINDOW
                 )
             else:
                 kwargs["start_new_session"] = True
 
-            subprocess.Popen([interpreter, str(self._script)], **kwargs)
-            self.launched.emit(self._label)
+            proc = subprocess.Popen([interpreter, str(self._script)], **kwargs)
+
+            # Wait up to 3 s: if the process exits that quickly it crashed.
+            try:
+                proc.wait(timeout=3)
+                # Process is gone — read whatever it wrote to stderr
+                stderr_out = ""
+                try:
+                    stderr_out = proc.stderr.read().decode("utf-8", errors="replace").strip()
+                except Exception:
+                    pass
+
+                crash_log = self._script.parent / (self._script.stem + "_crash.log")
+                crash_hint = (
+                    f"\n\nCheck the crash log for details:\n{crash_log}"
+                    if crash_log.exists() else ""
+                )
+                self.failed.emit(
+                    self._label,
+                    f"{self._label} exited immediately (code {proc.returncode}).\n\n"
+                    f"{stderr_out[:600] if stderr_out else 'No stderr output.'}"
+                    f"{crash_hint}"
+                )
+            except subprocess.TimeoutExpired:
+                # Still running after 3 s — great, it's alive.
+                # Close our end of the stderr pipe and let the child run freely.
+                try:
+                    proc.stderr.close()
+                except Exception:
+                    pass
+                self.launched.emit(self._label)
+
         except Exception as e:
             self.failed.emit(self._label, str(e))
 

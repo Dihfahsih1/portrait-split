@@ -141,6 +141,28 @@ def check_system():
     else:
         warn("ffmpeg not found — will be installed automatically")
 
+    # Tkinter check — Portrait Split GUI requires it; cannot be pip-installed.
+    # On Windows it ships with the official Python installer but can be absent
+    # if the user unchecked "tcl/tk and IDLE" during setup, or installed via
+    # a minimal distribution.
+    try:
+        import tkinter as _tk
+        del _tk
+        ok("tkinter (Tcl/Tk) available")
+    except ImportError:
+        if IS_WINDOWS:
+            fail(
+                "Tkinter (Tcl/Tk) is not available — Portrait Split GUI will not work.\n"
+                "\n"
+                "  Fix: open 'Apps & Features', find Python, click Modify,\n"
+                "       then enable 'tcl/tk and IDLE'.\n"
+                "  Or reinstall Python from https://python.org and tick\n"
+                "       'tcl/tk and IDLE' during installation."
+            )
+        elif IS_LINUX:
+            warn("tkinter missing — attempting to install python3-tk ...")
+            run(["sudo", "apt-get", "install", "-y", "python3-tk"], check=False)
+
     if IS_EMBEDDED:
         ok("Embedded Python detected — skipping venv check")
     else:
@@ -401,8 +423,14 @@ def _create_launchers_windows():
             pythonw = VENV_PYTHON  # Fallback to python.exe if pythonw.exe not found
         python_exe = VENV_PYTHON  # For shortcuts, use python.exe
     else:
-        pythonw = VENV_DIR / "Scripts" / "pythonw.exe"
+        _candidate_pythonw = VENV_DIR / "Scripts" / "pythonw.exe"
+        # pythonw.exe should be present in a standard Windows venv, but some
+        # minimal Python builds omit it. Fall back to python.exe so the VBS
+        # launchers don't silently fail with "Python not found".
+        pythonw = _candidate_pythonw if _candidate_pythonw.exists() else VENV_PYTHON
         python_exe = VENV_PYTHON
+        if not _candidate_pythonw.exists():
+            warn("pythonw.exe not found in venv — using python.exe for GUI launchers (a console window will briefly appear)")
     
     # Create VBS launchers (silent, no console window)
     gui_apps = {
